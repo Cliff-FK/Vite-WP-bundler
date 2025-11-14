@@ -18,8 +18,13 @@
 import { PATHS } from '../paths.config.js';
 import { detectAssetsFromWordPress } from './wordpress-assets-detector.plugin.js';
 import { mkdirSync, writeFileSync, existsSync, unlinkSync, rmdirSync, readdirSync } from 'fs';
-import { resolve, dirname } from 'path';
+import { resolve } from 'path';
 import chalk from 'chalk';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import { platform } from 'os';
+
+const execAsync = promisify(exec);
 
 // Chemins du MU-plugin
 const muPluginsPath = resolve(PATHS.wpRoot, 'wp-content/mu-plugins');
@@ -37,21 +42,31 @@ if (existsSync(muPluginsPath)) {
 }
 
 // Détecter les assets depuis WordPress (utilise le même scanner que le build)
-console.log('🔍 Détection des assets depuis WordPress...');
 const detectedAssets = await detectAssetsFromWordPress();
 const buildFolder = detectedAssets.buildFolder;
 
-// Extraire les sources par catégorie (front/admin/both)
+// Extraire les sources par catégorie (front/admin/editor)
 const frontSources = detectedAssets.front.sources;
 const adminSources = detectedAssets.admin.sources;
-const bothSources = detectedAssets.both.sources;
+const editorSources = detectedAssets.editor.sources;
 
-// Affichage minimal - juste l'URL WordPress
+// Construire l'URL WordPress
+const wpUrl = `${PATHS.wpProtocol}://${PATHS.wpHost}:${PATHS.wpPort}${PATHS.wpBasePath}`;
+
+// Affichage de l'URL WordPress
 console.log(
-  chalk.green('➜') + '  ' +
   chalk.bold('Ouvre:') + ' ' +
-  chalk.green(`${PATHS.wpProtocol}://${PATHS.wpHost}:${PATHS.wpPort}${PATHS.wpBasePath}`)
+  chalk.green(wpUrl)
 );
+
+// Ouvrir l'URL dans le navigateur par défaut
+const os = platform();
+const openCommand = os === 'win32' ? `start "" "${wpUrl}"` : os === 'darwin' ? `open "${wpUrl}"` : `xdg-open "${wpUrl}"`;
+try {
+  await execAsync(openCommand);
+} catch (err) {
+  // Silencieux en cas d'erreur
+}
 
 // 2. Générer le contenu du MU-plugin
 const muPluginContent = `<?php
@@ -73,56 +88,113 @@ define('VITE_URL', '${PATHS.viteUrl}');
 define('VITE_PORT', ${PATHS.vitePort});
 
 // Assets détectés dynamiquement depuis functions.php
-// Catégorisés par contexte: front, admin, both
+// Catégorisés par contexte: front, admin (pages WP), editor (iframe Gutenberg)
+// NOTE: Les assets admin ne sont PAS injectés par Vite - WordPress utilise ses assets de build
 \$vite_front_sources = ${JSON.stringify(frontSources, null, 2)};
-\$vite_admin_sources = ${JSON.stringify(adminSources, null, 2)};
-\$vite_both_sources = ${JSON.stringify(bothSources, null, 2)};
+\$vite_admin_sources = ${JSON.stringify(adminSources, null, 2)}; // Conservé pour référence uniquement
+\$vite_editor_sources = ${JSON.stringify(editorSources, null, 2)};
 \$vite_build_folder = '${buildFolder}';
 
 /**
- * Déterminer quels assets doivent être chargés selon le contexte
+ * Dequeue les assets de build pour les remplacer par Vite (FRONT + EDITOR uniquement)
+ * Les assets ADMIN ne sont PAS dequeued - WordPress les charge normalement
  */
-function vite_get_assets_for_context() {
-  global \$vite_front_sources, \$vite_admin_sources, \$vite_both_sources;
+function vite_dequeue_build_assets_front() {
+  global \$vite_build_folder, \$vite_front_sources;
 
-  \$assets = \$vite_both_sources; // Toujours charger "both"
-
-  if (is_admin()) {
-    // Admin: both + admin
-    \$assets = array_merge(\$assets, \$vite_admin_sources);
-  } else {
-    // Front: both + front
-    \$assets = array_merge(\$assets, \$vite_front_sources);
-  }
-
-  return array_unique(\$assets);
-}
-
-/**
- * Fonction de nettoyage des assets de build (partagée front + admin)
- */
-function vite_remove_build_assets_callback(\$html) {
-  global \$vite_build_folder;
-  \$vite_sources = vite_get_assets_for_context();
-
-  foreach (\$vite_sources as \$sourcePath) {
+  foreach (\$vite_front_sources as \$sourcePath) {
     // Convertir source → build path
     \$buildPath = str_replace('.js', '.min.js', \$sourcePath);
     \$buildPath = str_replace('.scss', '.min.css', \$buildPath);
     \$buildPath = str_replace('scss/', 'css/', \$buildPath);
 
-    // Utiliser strpos() au lieu de regex pour plus de sécurité
-    // On cherche juste si le href/src contient "optimised/css/style.min.css"
     \$searchPath = \$vite_build_folder . '/' . \$buildPath;
+    \$fileName = basename(\$buildPath);
+
+    // Parcourir tous les styles/scripts enregistrés pour trouver ceux qui correspondent
+    global \$wp_styles, \$wp_scripts;
+
+    // Détecter et dequeue les styles
+    if (strpos(\$buildPath, '.css') !== false && !empty(\$wp_styles->registered)) {
+      foreach (\$wp_styles->registered as \$handle => \$style) {
+        if (!empty(\$style->src) && (
+          strpos(\$style->src, \$searchPath) !== false ||
+          strpos(\$style->src, \$fileName) !== false
+        )) {
+          // Sauvegarder les inline styles avant de dequeue (pour les réattacher après)
+          \$inline_styles = isset(\$style->extra['after']) ? \$style->extra['after'] : [];
+
+          wp_dequeue_style(\$handle);
+          wp_deregister_style(\$handle);
+
+          // Si des inline styles existaient, les réenregistrer sur un handle temporaire
+          // pour qu'ils restent dans le HTML (ex: add_css_fse_vars.php)
+          if (!empty(\$inline_styles)) {
+            \$temp_handle = \$handle . '-inline-only';
+            // Enregistrer un style vide (pas de src, juste pour porter les inline styles)
+            wp_register_style(\$temp_handle, false);
+            wp_enqueue_style(\$temp_handle);
+            // Réattacher tous les inline styles
+            foreach (\$inline_styles as \$inline_css) {
+              wp_add_inline_style(\$temp_handle, \$inline_css);
+            }
+          }
+        }
+      }
+    }
+
+    // Détecter et dequeue les scripts
+    if (strpos(\$buildPath, '.js') !== false && !empty(\$wp_scripts->registered)) {
+      foreach (\$wp_scripts->registered as \$handle => \$script) {
+        if (!empty(\$script->src) && (
+          strpos(\$script->src, \$searchPath) !== false ||
+          strpos(\$script->src, \$fileName) !== false
+        )) {
+          wp_dequeue_script(\$handle);
+          wp_deregister_script(\$handle);
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Hook pour dequeue les assets de build - FRONT uniquement
+ * L'admin utilise les assets WordPress normaux (pas de Vite en admin)
+ */
+add_action('wp_enqueue_scripts', 'vite_dequeue_build_assets_front', 9999);
+
+/**
+ * Fonction de nettoyage des assets de build via output buffering (FRONT uniquement)
+ * Fallback au cas où wp_dequeue_* ne capture pas certains assets
+ */
+function vite_remove_build_assets_callback(\$html) {
+  global \$vite_build_folder, \$vite_front_sources;
+
+  foreach (\$vite_front_sources as \$sourcePath) {
+    // Convertir source → build path
+    \$buildPath = str_replace('.js', '.min.js', \$sourcePath);
+    \$buildPath = str_replace('.scss', '.min.css', \$buildPath);
+    \$buildPath = str_replace('scss/', 'css/', \$buildPath);
+
+    // Construire le chemin de recherche (relatif depuis le thème)
+    // Ex: optimised/css/admin.min.css
+    \$searchPath = \$vite_build_folder . '/' . \$buildPath;
+
+    // Aussi chercher juste le nom du fichier final (pour les URLs complètes)
+    // Ex: admin.min.css
+    \$fileName = basename(\$buildPath);
 
     // CSS - Retirer les <link> qui contiennent le chemin de build
     if (strpos(\$buildPath, '.css') !== false) {
       // Trouver toutes les balises <link> qui contiennent notre chemin
       \$html = preg_replace_callback(
         '/<link[^>]*>/i',
-        function(\$matches) use (\$searchPath) {
-          // Si le tag contient notre chemin de build, on le supprime
-          if (strpos(\$matches[0], \$searchPath) !== false) {
+        function(\$matches) use (\$searchPath, \$fileName) {
+          // Si le tag contient notre chemin de build OU le nom du fichier, on le supprime
+          // Cela gère à la fois les chemins relatifs et les URLs complètes
+          if (strpos(\$matches[0], \$searchPath) !== false ||
+              (strpos(\$matches[0], \$fileName) !== false && strpos(\$matches[0], 'href') !== false)) {
             return '';
           }
           return \$matches[0];
@@ -136,9 +208,10 @@ function vite_remove_build_assets_callback(\$html) {
       // Trouver toutes les balises <script> qui contiennent notre chemin
       \$html = preg_replace_callback(
         '/<script[^>]*><\\\\/script>/i',
-        function(\$matches) use (\$searchPath) {
-          // Si le tag contient notre chemin de build, on le supprime
-          if (strpos(\$matches[0], \$searchPath) !== false) {
+        function(\$matches) use (\$searchPath, \$fileName) {
+          // Si le tag contient notre chemin de build OU le nom du fichier, on le supprime
+          if (strpos(\$matches[0], \$searchPath) !== false ||
+              (strpos(\$matches[0], \$fileName) !== false && strpos(\$matches[0], 'src') !== false)) {
             return '';
           }
           return \$matches[0];
@@ -152,11 +225,13 @@ function vite_remove_build_assets_callback(\$html) {
 }
 
 /**
- * Retirer les assets de build du HTML - FRONT
+ * Retirer les assets de build du HTML - FRONT uniquement (pas admin)
  * Utilise template_redirect pour capturer TOUT le HTML
  */
 add_action('template_redirect', function() {
-  ob_start('vite_remove_build_assets_callback');
+  if (!is_admin()) {
+    ob_start('vite_remove_build_assets_callback');
+  }
 });
 
 add_action('shutdown', function() {
@@ -166,24 +241,21 @@ add_action('shutdown', function() {
 }, 999);
 
 /**
- * Retirer les assets de build du HTML - ADMIN
- * Utilise admin_init pour capturer le HTML de l'admin
+ * NOTE: L'admin WordPress utilise les assets de build normaux (pas de Vite)
+ * Seuls le FRONT et l'EDITOR (iframe Gutenberg) utilisent Vite HMR
  */
-add_action('admin_init', function() {
-  ob_start('vite_remove_build_assets_callback');
-});
 
 /**
- * Fonction d'injection des assets Vite (utilisée pour front et admin)
+ * Fonction d'injection des assets Vite pour FRONT
  */
-function vite_inject_assets() {
-  \$vite_sources = vite_get_assets_for_context();
+function vite_inject_front_assets() {
+  global \$vite_front_sources;
 
   // 1. Client Vite pour HMR
   echo '<script type="module" src="' . VITE_URL . '/@vite/client"></script>' . "\\n";
 
   // 2. Assets sources (JS et SCSS)
-  foreach (\$vite_sources as \$sourcePath) {
+  foreach (\$vite_front_sources as \$sourcePath) {
     \$themePath = get_template_directory();
     \$absolutePath = \$themePath . '/' . \$sourcePath;
 
@@ -197,104 +269,25 @@ function vite_inject_assets() {
       echo '<script type="module" src="' . esc_url(\$viteUrl) . '"></script>' . "\\n";
     } elseif (preg_match('/\\\\.(scss|css)$/', \$sourcePath)) {
       // Stylesheet SCSS/CSS via import dynamique pour que Vite compile et active le HMR
-      // Au lieu de <link>, on utilise <script type="module"> avec import
-      // Vite va compiler le SCSS en CSS et l'injecter dans le DOM avec HMR
       echo '<script type="module">import "' . esc_url(\$viteUrl) . '";</script>' . "\\n";
     }
   }
 }
 
 /**
- * Fonction de debug (utilisée pour front et admin)
+ * Fonction de debug FRONT
  */
-function vite_inject_debug() {
-  \$vite_sources = vite_get_assets_for_context();
-  \$context = is_admin() ? 'admin' : 'front';
-  echo "<!-- Vite Dev Mode actif [" . \$context . "] (" . count(\$vite_sources) . " assets injectés) -->\\n";
+function vite_inject_front_debug() {
+  global \$vite_front_sources;
+  echo "<!-- Vite Dev Mode actif [front] (" . count(\$vite_front_sources) . " assets injectés) -->\\n";
 }
 
 /**
- * Script pour injecter les styles Vite dans l'iframe Gutenberg
+ * Injecter les assets Vite dans le <head> - FRONT uniquement
+ * L'admin WordPress (y compris l'éditeur Gutenberg) utilise les assets de build normaux
  */
-function vite_inject_iframe_styles_script() {
-  if (!is_admin()) return;
-  ?>
-  <script>
-  (function() {
-    // Fonction pour injecter les styles Vite dans l'iframe editor-canvas
-    function injectViteStylesIntoEditorCanvas() {
-      const iframe = document.querySelector('iframe[name="editor-canvas"]');
-      if (!iframe || !iframe.contentDocument) return false;
-
-      // Récupérer tous les styles Vite du parent
-      const viteStyles = document.querySelectorAll('style[data-vite-dev-id]');
-      if (viteStyles.length === 0) return false;
-
-      // Injecter dans l'iframe
-      viteStyles.forEach(style => {
-        const viteId = style.getAttribute('data-vite-dev-id');
-        // Vérifier si déjà injecté
-        if (iframe.contentDocument.querySelector(\`style[data-vite-dev-id="\${viteId}"]\`)) {
-          // Mettre à jour le contenu existant (HMR)
-          const existingStyle = iframe.contentDocument.querySelector(\`style[data-vite-dev-id="\${viteId}"]\`);
-          existingStyle.textContent = style.textContent;
-        } else {
-          // Cloner et injecter
-          const clonedStyle = style.cloneNode(true);
-          iframe.contentDocument.head.appendChild(clonedStyle);
-        }
-      });
-
-      return true;
-    }
-
-    // Observer l'apparition de l'iframe
-    const iframeObserver = new MutationObserver(() => {
-      const iframe = document.querySelector('iframe[name="editor-canvas"]');
-      if (iframe) {
-        // Attendre que l'iframe soit chargée
-        iframe.addEventListener('load', () => {
-          setTimeout(injectViteStylesIntoEditorCanvas, 100);
-        });
-        // Essayer aussi immédiatement
-        injectViteStylesIntoEditorCanvas();
-      }
-    });
-
-    // Observer les changements dans le <head> parent pour détecter les mises à jour HMR
-    const stylesObserver = new MutationObserver(() => {
-      injectViteStylesIntoEditorCanvas();
-    });
-
-    // Démarrer les observers quand le DOM est prêt
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', () => {
-        iframeObserver.observe(document.body, { childList: true, subtree: true });
-        stylesObserver.observe(document.head, { childList: true, subtree: true });
-        injectViteStylesIntoEditorCanvas();
-      });
-    } else {
-      iframeObserver.observe(document.body, { childList: true, subtree: true });
-      stylesObserver.observe(document.head, { childList: true, subtree: true });
-      injectViteStylesIntoEditorCanvas();
-    }
-  })();
-  </script>
-  <?php
-}
-
-/**
- * Injecter les assets Vite dans le <head> - FRONT
- */
-add_action('wp_head', 'vite_inject_assets', 1);
-add_action('wp_head', 'vite_inject_debug', 1);
-
-/**
- * Injecter les assets Vite dans le <head> - ADMIN
- */
-add_action('admin_head', 'vite_inject_assets', 1);
-add_action('admin_head', 'vite_inject_debug', 1);
-add_action('admin_footer', 'vite_inject_iframe_styles_script', 999);
+add_action('wp_head', 'vite_inject_front_assets', 1);
+add_action('wp_head', 'vite_inject_front_debug', 1);
 `;
 
 // 2. Créer le dossier mu-plugins si nécessaire

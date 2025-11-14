@@ -2,18 +2,27 @@ import { PATHS, PHP_FILES_TO_SCAN } from '../paths.config.js';
 import { existsSync, copyFileSync, mkdirSync, readFileSync, openSync, readSync, closeSync } from 'fs';
 import { resolve, dirname } from 'path';
 import chalk from 'chalk';
+import { getCachedAssets, saveCachedAssets } from './cache-manager.plugin.js';
 
-// Cache des assets détectés pour éviter le double scan
+// Cache en mémoire des assets détectés pour éviter le double scan dans la même session
 let cachedAssets = null;
 
 /**
  * Détecte les assets depuis les fichiers PHP configurés (scan pur)
  * Par défaut: functions.php
  * Configurable via VITE_PHP_FILES dans .env
+ * Utilise un cache persistent invalidé automatiquement si les fichiers PHP changent
  */
 export async function detectAssetsFromWordPress() {
-  // Retourner le cache si disponible
+  // 1. Cache mémoire (session actuelle)
   if (cachedAssets) {
+    return cachedAssets;
+  }
+
+  // 2. Cache persistent (fichier .cache/)
+  const persistentCache = getCachedAssets();
+  if (persistentCache) {
+    cachedAssets = persistentCache;
     return cachedAssets;
   }
 
@@ -26,7 +35,7 @@ export async function detectAssetsFromWordPress() {
       const phpFilePath = resolve(PATHS.themePath, phpFile);
 
       if (!existsSync(phpFilePath)) {
-        console.warn(`   ⚠ ${phpFile} introuvable, ignoré`);
+        console.warn(`   ${phpFile} introuvable, ignoré`);
         continue;
       }
 
@@ -36,11 +45,11 @@ export async function detectAssetsFromWordPress() {
     }
 
     if (foundFiles === 0) {
-      console.warn('⚠ Aucun fichier PHP trouvé');
+      console.warn('Aucun fichier PHP trouvé');
       return {
         front: { sources: [], libs: [] },
         admin: { sources: [], libs: [] },
-        both: { sources: [], libs: [] },
+        editor: { sources: [], libs: [] },
         buildFolder: 'dist'
       };
     }
@@ -57,98 +66,156 @@ export async function detectAssetsFromWordPress() {
 
     const assets = {
       front: { scripts: [], styles: [] },
-      admin: { scripts: [], styles: [] },
-      both: { scripts: [], styles: [] },
+      admin: { scripts: [], styles: [] },      // Pages admin WP (dashboard, settings, etc.)
+      editor: { scripts: [], styles: [] },     // Iframe Gutenberg uniquement
       buildFolder
     };
 
-    // Regex améliorée pour capturer le hook ET le chemin du fichier
-    // Cherche: add_action('wp_enqueue_scripts', function() { wp_register_script(..., 'js/main.min.js', ...) })
-    const scriptRegex = /add_action\s*\(\s*['"]([^'"]+)['"]\s*,\s*function\s*\([^)]*\)\s*\{[^}]*?wp_(?:register|enqueue)_script\s*\([^,]+,\s*(?:OPTI_PATH(?:_URI)?\s*\.\s*)?['"](js\/[^'"]+\.js)['"]/gs;
+    // Regex améliorée pour capturer le hook ET le contenu complet de la fonction
+    // Cherche: add_action('hook', function() { ... wp_register_script(...) ... })
+    const scriptBlockRegex = /add_action\s*\(\s*['"]([^'"]+)['"]\s*,\s*function\s*\([^)]*\)\s*\{([^}]*?wp_(?:register|enqueue)_script[^}]*)\}/gs;
 
-    let match;
-    while ((match = scriptRegex.exec(functionsContent)) !== null) {
-      const hook = match[1];
-      let scriptPath = match[2];
+    let blockMatch;
+    while ((blockMatch = scriptBlockRegex.exec(functionsContent)) !== null) {
+      const hook = blockMatch[1];
+      const functionBody = blockMatch[2];
 
-      // Ignorer les URLs externes
-      if (scriptPath.startsWith('http')) continue;
+      // Vérifier si la fonction contient une condition !is_admin() ou $_GET['context'] === 'iframe'
+      const hasAdminCheck = /!\s*is_admin\s*\(\s*\)/.test(functionBody);
+      const hasIframeCheck = /\$_GET\s*\[\s*['"]context['"]\s*\]\s*===\s*['"]iframe['"]/.test(functionBody);
 
-      // Convertir build → source
-      scriptPath = convertBuildToSourcePath(scriptPath);
+      // Extraire tous les scripts enqueued dans ce bloc
+      const scriptRegex = /wp_(?:register|enqueue)_script\s*\([^,]+,\s*(?:OPTI_PATH(?:_URI)?\s*\.\s*)?['"](js\/[^'"]+\.js)['"]/g;
+      let match;
+      while ((match = scriptRegex.exec(functionBody)) !== null) {
+        let scriptPath = match[1];
 
-      // Déterminer le contexte
-      if (hook.includes('admin') || hook.includes('login') || hook.includes('customize_register')) {
-        // Admin uniquement
-        if (!assets.admin.scripts.includes(scriptPath)) {
-          assets.admin.scripts.push(scriptPath);
-        }
-      } else if (hook.includes('wp_enqueue_scripts')) {
-        // Front uniquement
-        if (!assets.front.scripts.includes(scriptPath)) {
-          assets.front.scripts.push(scriptPath);
-        }
-      } else if (hook.includes('enqueue_block_assets') || hook.includes('enqueue_block_editor_assets')) {
-        // Gutenberg : both (front ET admin car éditeur + rendu front)
-        if (!assets.both.scripts.includes(scriptPath)) {
-          assets.both.scripts.push(scriptPath);
-        }
-      } else {
-        // Autres hooks (init, after_setup_theme, etc.) → both par défaut
-        if (!assets.both.scripts.includes(scriptPath)) {
-          assets.both.scripts.push(scriptPath);
+        // Ignorer les URLs externes
+        if (scriptPath.startsWith('http')) continue;
+
+        // Convertir build → source
+        scriptPath = convertBuildToSourcePath(scriptPath);
+
+        // Déterminer le contexte selon le hook ET les conditions détectées
+        if (hook.includes('wp_enqueue_scripts')) {
+          // Frontend public uniquement
+          if (!assets.front.scripts.includes(scriptPath)) {
+            assets.front.scripts.push(scriptPath);
+          }
+        } else if (hook.includes('enqueue_block_editor_assets')) {
+          // Iframe Gutenberg uniquement (éditeur)
+          if (!assets.editor.scripts.includes(scriptPath)) {
+            assets.editor.scripts.push(scriptPath);
+          }
+        } else if (hook.includes('enqueue_block_assets')) {
+          // Hybride : Frontend (rendu blocs) + Iframe Gutenberg (éditeur)
+          // NOTE: WordPress charge aussi ces assets dans l'admin, mais Vite ne doit PAS les remplacer
+          // Le MU-plugin se charge de ne PAS injecter Vite dans l'admin (seulement front + editor iframe)
+          if (!assets.front.scripts.includes(scriptPath)) {
+            assets.front.scripts.push(scriptPath);
+          }
+          if (!assets.editor.scripts.includes(scriptPath)) {
+            assets.editor.scripts.push(scriptPath);
+          }
+        } else if (hook.includes('admin') || hook.includes('login') || hook.includes('customize_register')) {
+          // Pages admin WP (dashboard, settings, login, customizer)
+          if (!assets.admin.scripts.includes(scriptPath)) {
+            assets.admin.scripts.push(scriptPath);
+          }
+        } else {
+          // Hooks ambigus (init, after_setup_theme, etc.)
+          // Par sécurité : considérer comme admin WP
+          if (!assets.admin.scripts.includes(scriptPath)) {
+            assets.admin.scripts.push(scriptPath);
+          }
         }
       }
     }
 
-    // Idem pour les styles avec add_editor_style
-    const styleRegex = /(?:add_action\s*\(\s*['"]([^'"]+)['"]\s*,\s*function\s*\([^)]*\)\s*\{[^}]*?(?:wp_(?:register|enqueue)_style|add_editor_style)\s*\([^,]*,?\s*(?:OPTI_PATH(?:_URI)?\s*\.\s*)?['"]([^'"]+\.(?:css|scss))['"]|add_editor_style\s*\(\s*(?:OPTI_PATH(?:_URI)?\s*\.\s*)?['"]([^'"]+\.(?:css|scss))['"])/gs;
+    // Idem pour les styles - détecter les blocs add_action avec conditions
+    const styleBlockRegex = /add_action\s*\(\s*['"]([^'"]+)['"]\s*,\s*function\s*\([^)]*\)\s*\{([^}]*?wp_(?:register|enqueue)_style[^}]*)\}/gs;
 
-    while ((match = styleRegex.exec(functionsContent)) !== null) {
-      const hook = match[1] || 'after_setup_theme'; // add_editor_style n'a pas de hook
-      let stylePath = match[2] || match[3];
+    while ((blockMatch = styleBlockRegex.exec(functionsContent)) !== null) {
+      const hook = blockMatch[1];
+      const functionBody = blockMatch[2];
 
+      // Vérifier si la fonction contient une condition !is_admin() ou $_GET['context'] === 'iframe'
+      const hasAdminCheck = /!\s*is_admin\s*\(\s*\)/.test(functionBody);
+      const hasIframeCheck = /\$_GET\s*\[\s*['"]context['"]\s*\]\s*===\s*['"]iframe['"]/.test(functionBody);
+
+      // Extraire tous les styles enqueued dans ce bloc
+      const styleRegex = /wp_(?:register|enqueue)_style\s*\([^,]+,\s*(?:OPTI_PATH(?:_URI)?\s*\.\s*)?['"]([^'"]+\.(?:css|scss))['"]/g;
+      let match;
+      while ((match = styleRegex.exec(functionBody)) !== null) {
+        let stylePath = match[1];
+
+        if (stylePath.startsWith('http')) continue;
+
+        stylePath = convertBuildToSourcePath(stylePath);
+
+        // Déterminer le contexte selon le hook ET les conditions détectées
+        if (hook.includes('wp_enqueue_scripts')) {
+          // Frontend public uniquement
+          if (!assets.front.styles.includes(stylePath)) {
+            assets.front.styles.push(stylePath);
+          }
+        } else if (hook.includes('enqueue_block_editor_assets')) {
+          // Iframe Gutenberg uniquement (éditeur)
+          if (!assets.editor.styles.includes(stylePath)) {
+            assets.editor.styles.push(stylePath);
+          }
+        } else if (hook.includes('enqueue_block_assets')) {
+          // Hybride : Frontend (rendu blocs) + Iframe Gutenberg (éditeur)
+          // NOTE: WordPress charge aussi ces assets dans l'admin, mais Vite ne doit PAS les remplacer
+          // Le MU-plugin se charge de ne PAS injecter Vite dans l'admin (seulement front + editor iframe)
+          if (!assets.front.styles.includes(stylePath)) {
+            assets.front.styles.push(stylePath);
+          }
+          if (!assets.editor.styles.includes(stylePath)) {
+            assets.editor.styles.push(stylePath);
+          }
+        } else if (hook.includes('admin') || hook.includes('login') || hook.includes('customize_register')) {
+          // Pages admin WP (dashboard, settings, login, customizer)
+          if (!assets.admin.styles.includes(stylePath)) {
+            assets.admin.styles.push(stylePath);
+          }
+        } else {
+          // Hooks ambigus (init, etc.)
+          // Par sécurité : considérer comme admin WP
+          if (!assets.admin.styles.includes(stylePath)) {
+            assets.admin.styles.push(stylePath);
+          }
+        }
+      }
+    }
+
+    // Gérer add_editor_style() séparément (sans hook)
+    const editorStyleRegex = /add_editor_style\s*\(\s*(?:OPTI_PATH(?:_URI)?\s*\.\s*)?['"]([^'"]+\.(?:css|scss))['"]/g;
+    let editorMatch;
+    while ((editorMatch = editorStyleRegex.exec(functionsContent)) !== null) {
+      let stylePath = editorMatch[1];
       if (stylePath.startsWith('http')) continue;
-
       stylePath = convertBuildToSourcePath(stylePath);
-
-      if (hook.includes('admin') || hook.includes('editor') || hook.includes('after_setup_theme') || hook.includes('customize_register') || hook.includes('login')) {
-        // Admin/Editor uniquement (inclut add_editor_style, customizer, login)
-        if (!assets.admin.styles.includes(stylePath)) {
-          assets.admin.styles.push(stylePath);
-        }
-      } else if (hook.includes('wp_enqueue_scripts')) {
-        // Front uniquement
-        if (!assets.front.styles.includes(stylePath)) {
-          assets.front.styles.push(stylePath);
-        }
-      } else if (hook.includes('enqueue_block_assets') || hook.includes('enqueue_block_editor_assets')) {
-        // Gutenberg : both (front ET admin)
-        if (!assets.both.styles.includes(stylePath)) {
-          assets.both.styles.push(stylePath);
-        }
-      } else {
-        // Autres hooks → both par défaut
-        if (!assets.both.styles.includes(stylePath)) {
-          assets.both.styles.push(stylePath);
-        }
+      if (!assets.editor.styles.includes(stylePath)) {
+        assets.editor.styles.push(stylePath);
       }
     }
 
     // Séparer sources vs libs pour chaque contexte
     const result = categorizeAssets(assets);
 
-    // Mettre en cache pour éviter le double scan
+    // Mettre en cache (mémoire + persistent)
     cachedAssets = result;
+    saveCachedAssets(result);
 
     return result;
 
   } catch (err) {
-    console.error('⚠ Erreur scan functions.php:', err.message);
+    console.error('Erreur scan functions.php:', err.message);
     const errorResult = {
       front: { sources: [], libs: [] },
       admin: { sources: [], libs: [] },
-      both: { sources: [], libs: [] },
+      editor: { sources: [], libs: [] },
       buildFolder: 'dist'
     };
 
@@ -280,7 +347,7 @@ function isLibrary(filePath) {
     return false;
 
   } catch (err) {
-    console.warn(`⚠ Erreur détection lib ${filePath}:`, err.message);
+    console.warn(`Erreur détection lib ${filePath}:`, err.message);
     // Fallback: si .min dans le nom et pas dans KNOWN_SOURCES
     return filePath.includes('.min.') && !['main', 'style', 'admin'].some(s => filePath.includes(s));
   }
@@ -293,12 +360,12 @@ function categorizeAssets(assets) {
   const result = {
     front: { sources: [], libs: [] },
     admin: { sources: [], libs: [] },
-    both: { sources: [], libs: [] },
+    editor: { sources: [], libs: [] },
     buildFolder: assets.buildFolder
   };
 
   // Traiter chaque contexte
-  for (const context of ['front', 'admin', 'both']) {
+  for (const context of ['front', 'admin', 'editor']) {
     // Scripts
     for (const script of assets[context].scripts) {
       if (isLibrary(script)) {
@@ -321,36 +388,36 @@ function categorizeAssets(assets) {
   // Logs de debug avec déduplication pour affichage uniquement
   // (les assets réels ne sont PAS modifiés, juste les compteurs d'affichage)
   const allAssets = new Set([
-    ...result.both.sources,
-    ...result.both.libs,
+    ...result.editor.sources,
+    ...result.editor.libs,
     ...result.front.sources,
     ...result.front.libs,
     ...result.admin.sources,
     ...result.admin.libs
   ]);
 
-  // Compter les assets uniques par contexte en priorisant: both > admin > front
+  // Compter les assets uniques par contexte en priorisant: editor > admin > front
   const displayCounts = {
     frontSources: 0,
     frontLibs: 0,
     adminSources: 0,
     adminLibs: 0,
-    bothSources: 0,
-    bothLibs: 0
+    editorSources: 0,
+    editorLibs: 0
   };
 
   allAssets.forEach(asset => {
-    const isBothSource = result.both.sources.includes(asset);
-    const isBothLib = result.both.libs.includes(asset);
+    const isEditorSource = result.editor.sources.includes(asset);
+    const isEditorLib = result.editor.libs.includes(asset);
     const isAdminSource = result.admin.sources.includes(asset);
     const isAdminLib = result.admin.libs.includes(asset);
     const isFrontSource = result.front.sources.includes(asset);
     const isFrontLib = result.front.libs.includes(asset);
 
-    // Priorité: both > admin > front (un asset n'est compté qu'une seule fois)
-    if (isBothSource || isBothLib) {
-      if (isBothSource) displayCounts.bothSources++;
-      if (isBothLib) displayCounts.bothLibs++;
+    // Priorité: editor > admin > front (un asset n'est compté qu'une seule fois)
+    if (isEditorSource || isEditorLib) {
+      if (isEditorSource) displayCounts.editorSources++;
+      if (isEditorLib) displayCounts.editorLibs++;
     } else if (isAdminSource || isAdminLib) {
       if (isAdminSource) displayCounts.adminSources++;
       if (isAdminLib) displayCounts.adminLibs++;
@@ -361,6 +428,32 @@ function categorizeAssets(assets) {
   });
 
   return result;
+}
+
+/**
+ * Détecte si le dossier de build utilise une structure plate ou avec sous-dossiers
+ * @returns {Object} { isFlat, hasJsSubfolder, hasCssSubfolder }
+ */
+export function detectBuildStructure() {
+  const buildPath = resolve(PATHS.themePath, PATHS.assetFolders.dist);
+
+  // Si le dossier de build n'existe pas encore, supposer structure avec sous-dossiers
+  if (!existsSync(buildPath)) {
+    return {
+      isFlat: false,
+      hasJsSubfolder: true,
+      hasCssSubfolder: true
+    };
+  }
+
+  const hasJsSubfolder = existsSync(resolve(buildPath, PATHS.assetFolders.js));
+  const hasCssSubfolder = existsSync(resolve(buildPath, PATHS.assetFolders.css));
+
+  return {
+    isFlat: !hasJsSubfolder && !hasCssSubfolder,
+    hasJsSubfolder,
+    hasCssSubfolder
+  };
 }
 
 /**
@@ -376,7 +469,7 @@ export function generateRollupInputs(assets) {
   const allSources = [
     ...assets.front.sources,
     ...assets.admin.sources,
-    ...assets.both.sources
+    ...assets.editor.sources
   ];
 
   // Dédupliquer
@@ -391,19 +484,41 @@ export function generateRollupInputs(assets) {
       return; // Ignorer ce fichier
     }
 
-    // Utiliser le chemin sans extension comme clé
-    // Ex: js/main.js → js-main, scss/style.scss → scss-style
-    const name = path.replace(/\.(js|ts|scss|css)$/, '').replace(/\//g, '-');
+    // Générer le nom de l'entrée en préservant la structure pour le build
+    // Support des multi-level subdirectories : garder les 2 derniers segments
+    // Utiliser un séparateur unique (§) pour éviter la confusion avec les tirets dans les noms de fichiers
+    // Ex: assets/scripts/frontend/main.js → frontend§main
+    // Ex: js-src/app-main.js → js-src§app-main (préserve les tirets originaux)
+    // Ex: scss/style.scss → css§style (pour générer css/style.min.css)
+    const pathWithoutExt = path.replace(/\.(js|ts|scss|css)$/, '');
+    const pathParts = pathWithoutExt.split('/');
+
+    let name;
+    if (pathParts.length > 2) {
+      // Multi-level : garder les 2 derniers segments (dossier parent + fichier)
+      name = pathParts.slice(-2).join('§');
+    } else {
+      // Niveau simple : comportement standard
+      name = pathParts.join('§');
+    }
+
+    // Si c'est un fichier SCSS, remplacer le préfixe du dossier source par le dossier de sortie CSS
+    if (path.match(/\.scss$/)) {
+      // Extraire le premier segment du path (ex: scss, styles, etc.)
+      const sourceFolder = pathParts[0];
+      name = name.replace(new RegExp(`^${sourceFolder}§`), `${PATHS.assetFolders.css}§`);
+    }
+
     inputs[name] = absolutePath;
   });
 
   // Afficher les warnings pour les fichiers manquants
   if (missingFiles.length > 0) {
-    console.warn(`\n⚠️  ${missingFiles.length} fichier(s) enqueue(s) introuvable(s):`);
+    console.warn(`\n${missingFiles.length} fichier(s) enqueue(s) introuvable(s):`);
     missingFiles.forEach(file => {
-      console.warn(`   ⚠️  ${file} - Enqueue détecté mais fichier absent`);
+      console.warn(`   ${file} - Enqueue détecté mais fichier absent`);
     });
-    console.warn(`   → Le build continuera sans ces fichiers\n`);
+    console.warn(`   Le build continuera sans ces fichiers\n`);
   }
 
   return inputs;

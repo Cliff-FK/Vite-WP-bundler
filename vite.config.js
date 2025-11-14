@@ -4,33 +4,39 @@ import { postcssUrlRewrite } from './plugins/postcss-url-rewrite.plugin.js';
 import { phpReloadPlugin } from './plugins/php-reload.plugin.js';
 import {
   detectAssetsFromWordPress,
-  generateRollupInputs
+  generateRollupInputs,
+  detectBuildStructure
 } from './plugins/wordpress-assets-detector.plugin.js';
 import { portKillerPlugin } from './plugins/port-killer.plugin.js';
 import { cleanupMuPluginOnClose } from './plugins/cleanup-mu-plugin.plugin.js';
+import sassGlobImports from 'vite-plugin-sass-glob-import';
 import { resolve } from 'path';
 
 export default defineConfig(async ({ command }) => {
   let buildFolder = BUILD_FOLDER || PATHS.assetFolders.dist;
   let rollupInputs = {};
   let detectedAssets = null;
+  let buildStructure = null;
 
   // En mode build, détecter les assets depuis WordPress
   if (command === 'build') {
-    console.log('🔍 Détection des assets depuis WordPress...');
+    console.log('Détection des assets depuis WordPress...');
     detectedAssets = await detectAssetsFromWordPress();
 
     // Utiliser BUILD_FOLDER en priorité, puis détection, puis fallback
     buildFolder = BUILD_FOLDER || detectedAssets.buildFolder || PATHS.assetFolders.dist;
     rollupInputs = generateRollupInputs(detectedAssets);
 
-    console.log(`✓ Build folder: ${buildFolder}`);
-    console.log(`✓ Rollup inputs:`, Object.keys(rollupInputs));
+    // Détecter la structure du dossier de build (flat vs sous-dossiers)
+    buildStructure = detectBuildStructure();
   }
 
   return {
   // Racine du projet = dossier bundler (pour accéder à entry/)
   root: PATHS.bundlerRoot,
+
+  // Cache Vite pour optimisations
+  cacheDir: resolve(PATHS.bundlerRoot, 'node_modules/.vite'),
 
   // Base URL pour les assets
   base: '/',
@@ -63,13 +69,13 @@ export default defineConfig(async ({ command }) => {
       port: PATHS.vitePort,
       overlay: true,
     },
-
-    // Ouvrir WordPress automatiquement (le MU-plugin injecte Vite)
-    open: `${PATHS.wpProtocol}://${PATHS.wpHost}:${PATHS.wpPort}${PATHS.wpBasePath}`,
   },
 
   // Plugins Vite
   plugins: [
+    // Plugin pour supporter les globs SCSS (@import "vendors/*.scss")
+    sassGlobImports(),
+
     // Plugin pour libérer automatiquement le port Vite en mode dev
     // Tue uniquement les processus Node.js qui bloquent VITE_PORT
     ...(command === 'serve' ? [portKillerPlugin(PATHS.vitePort)] : []),
@@ -158,7 +164,7 @@ export default defineConfig(async ({ command }) => {
     // PostCSS plugins pour traiter le CSS compilé
     postcss: {
       plugins: [
-        postcssUrlRewrite(), // Réécrire les URLs après compilation SCSS
+        postcssUrlRewrite(command), // Passer le mode (serve/build) au plugin
       ],
     },
   },
@@ -176,6 +182,7 @@ export default defineConfig(async ({ command }) => {
       '@scss': resolve(PATHS.themePath, 'scss'),
       '@images': resolve(PATHS.themePath, 'images'),
       '@fonts': resolve(PATHS.themePath, 'fonts'),
+      '@bundler': PATHS.bundlerRoot,
     },
     extensions: ['.js', '.json', '.scss', '.css'],
   },
@@ -191,6 +198,10 @@ export default defineConfig(async ({ command }) => {
 
     // Configuration Rollup
     rollupOptions: {
+      // Ne pas essayer de résoudre les URLs dans le CSS
+      // PostCSS s'en occupe après via postcssUrlRewrite
+      makeAbsoluteExternalsRelative: false,
+
       // Entrées dynamiques détectées depuis WordPress (build) ou fallback
       input: command === 'build' && Object.keys(rollupInputs).length > 0
         ? rollupInputs
@@ -206,37 +217,69 @@ export default defineConfig(async ({ command }) => {
         // Nommage sans hash, avec .min et préservation de la structure
         chunkFileNames: '[name].min.js',
         entryFileNames: (chunkInfo) => {
-          // Convertir js-main → js/main.min.js
-          // Convertir scss-style → css/style.min.css (car le CSS vient du SCSS)
-          const name = chunkInfo.name.replace(/-/g, '/');
+          // Support des structures plates et avec sous-dossiers
+          // Le séparateur § est utilisé pour distinguer les segments de path des tirets dans les noms
+          if (buildStructure && buildStructure.isFlat) {
+            // Structure plate : pas de sous-dossiers
+            // Ex: js§main → main.min.js
+            // Ex: js-src§app-main → app-main.min.js (préserve les tirets)
+            const nameWithoutFolder = chunkInfo.name.split('§').pop();
+            return `${nameWithoutFolder}.min.js`;
+          }
+          // Structure avec sous-dossiers : restaurer la structure depuis le nom de l'entrée
+          // Ex: js§main → js/main.min.js
+          // Ex: js-src§app-main → js-src/app-main.min.js (préserve les tirets)
+          const name = chunkInfo.name.replace(/§/g, '/');
           return `${name}.min.js`;
         },
         assetFileNames: (assetInfo) => {
-          // Pour les CSS, restaurer la structure de dossiers
+          // Pour les CSS, utiliser le dossier détecté dynamiquement
           if (assetInfo.name && assetInfo.name.endsWith('.css')) {
-            // scss-style → css/style.min.css
-            let name = assetInfo.name.replace('.css', '');
-            name = name.replace(/-/g, '/');
-            // Remplacer scss/ par css/ dans le chemin final
-            name = name.replace('scss/', 'css/');
-            return `${name}.min.css`;
+            // Extraire le nom sans le préfixe du dossier
+            // Le séparateur § est utilisé pour préserver les tirets dans les noms
+            // Ex: css§style.css → style, css§admin.css → admin
+            // Ex: css-compiled§theme-2024.css → theme-2024 (préserve les tirets)
+            const baseName = assetInfo.name
+              .replace('.css', '')
+              .replace(new RegExp(`^${PATHS.assetFolders.css}§`), '');
+
+            // Support des structures plates et avec sous-dossiers
+            if (buildStructure && buildStructure.isFlat) {
+              // Structure plate : pas de sous-dossiers CSS
+              return `${baseName}.min.css`;
+            }
+            // Structure avec sous-dossiers CSS
+            return `${PATHS.assetFolders.css}/${baseName}.min.css`;
           }
           return '[name].min.[ext]';
         },
-        // Réécrire les chemins des imports externes (_libs)
-        // Au lieu de './_libs/swiper.min.js', générer '../js/_libs/swiper.min.js'
-        // Car le fichier build est dans optimised/js/main.min.js
-        // et les libs sources sont dans js/_libs/
+        // Réécrire les chemins des imports externes (libs)
+        // Support dynamique des différents patterns de dossiers de libs
         paths: (id) => {
-          // Si c'est un import vers _libs, réécrire le chemin
-          if (id.includes('_libs')) {
-            // Extraire juste le nom du fichier (ex: swiper-bundle.min.js)
-            // Utiliser split sur le chemin normalisé avec /
-            const normalizedPath = id.replace(/\\/g, '/');
-            const fileName = normalizedPath.split('/_libs/').pop();
-            // Retourner le chemin relatif depuis le dossier de build vers les sources
-            return `../js/_libs/${fileName}`;
+          const normalizedPath = id.replace(/\\/g, '/');
+
+          // Détecter dynamiquement le pattern de lib
+          // Patterns supportés : _libs, libs, lib, vendors, vendor
+          const libFolderMatch = normalizedPath.match(/\/(vendors?|_?libs?)\//);
+
+          if (libFolderMatch) {
+            const libFolder = libFolderMatch[1];
+            const fileName = normalizedPath.split(`/${libFolder}/`).pop();
+
+            // Calculer la profondeur relative depuis le build folder
+            // Ex: optimised/js/ → remonter de 2 niveaux (buildFolder + js/)
+            // Ex: dist/ (flat) → remonter de 1 niveau
+            let upLevels = '../../'; // Par défaut : 2 niveaux (buildFolder/js/)
+
+            if (buildStructure && buildStructure.isFlat) {
+              // Structure plate : remonter de 1 seul niveau
+              upLevels = '../';
+            }
+
+            // Retourner le chemin relatif depuis le build vers le dossier de lib source
+            return `${upLevels}${PATHS.assetFolders.js}/${libFolder}/${fileName}`;
           }
+
           return id;
         },
       },
@@ -248,8 +291,10 @@ export default defineConfig(async ({ command }) => {
         'get-size',
         'fizzy-ui-utils',
         'outlayer',
-        // Exclure aussi les imports relatifs vers _libs (libs minifiées)
-        /\/_libs\//,
+        // Détecter dynamiquement les imports vers des dossiers de libs
+        // Patterns communs : _libs, libs, lib, vendors, vendor, node_modules
+        // Utiliser une regex pour compatibilité avec le CSS build de Vite
+        /\/(vendors?|_?libs?|node_modules)\//
       ],
       // Supprimer les warnings de sourcemaps manquantes
       onwarn(warning, warn) {
@@ -258,12 +303,11 @@ export default defineConfig(async ({ command }) => {
       },
     },
 
-    // Minification
-    minify: 'terser',
-    terserOptions: {
-      compress: {
-        drop_console: true, // Supprimer les console.log en production
-      },
+    // Minification avec esbuild (beaucoup plus rapide que Terser)
+    minify: 'esbuild',
+    esbuildOptions: {
+      drop: ['console', 'debugger'], // Supprimer console.log et debugger
+      legalComments: 'none', // Pas de commentaires de licence
     },
 
     // Sourcemaps en production (désactivé par défaut)
@@ -298,7 +342,7 @@ export default defineConfig(async ({ command }) => {
     ],
   },
 
-  // Mode de log (info pour avoir les timestamps sur tous les logs)
+  // Mode de log (info pour afficher les fichiers générés)
   logLevel: 'info',
 
   // Clear screen au démarrage
@@ -310,6 +354,14 @@ export default defineConfig(async ({ command }) => {
       // Masquer le message "Local: http://localhost:PORT/" (déjà affiché par generate-mu-plugin)
       if (msg.includes('Local:') || (msg.includes('localhost') && msg.includes(String(PATHS.vitePort)))) {
         return; // Ne rien afficher
+      }
+
+      // Masquer les messages de progression et de build
+      if (msg.includes('transforming') ||
+          msg.includes('rendering chunks') ||
+          msg.includes('computing gzip size') ||
+          msg.includes('modules transformed')) {
+        return;
       }
 
       // Nettoyer les chemins /@fs/... et chemins absolus Windows pour les afficher depuis la racine du projet
@@ -350,6 +402,10 @@ export default defineConfig(async ({ command }) => {
           (msg.includes('lottie') || msg.includes('swiper'))) {
         return;
       }
+      // Ignorer les warnings d'URLs relatives non résolues (PostCSS les transforme après)
+      if (msg.includes("didn't resolve at build time")) {
+        return;
+      }
       console.warn(msg);
     },
     error: (msg) => {
@@ -360,7 +416,13 @@ export default defineConfig(async ({ command }) => {
       }
       console.error(msg);
     },
-    warnOnce: console.warn,
+    warnOnce: (msg) => {
+      // Ignorer les warnings d'URLs relatives non résolues
+      if (msg.includes("didn't resolve at build time")) {
+        return;
+      }
+      console.warn(msg);
+    },
     hasWarned: false,
   },
 };

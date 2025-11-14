@@ -6,7 +6,8 @@
   "author": "Gambetta Dev Team",
   "license": "MIT",
   "scripts": {
-    "dev": "node plugins/generate-mu-plugin.js && vite",
+    "dev": "node scripts/dev-parallel.js",
+    "dev:sequential": "node plugins/generate-mu-plugin.js && vite",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rimraf node_modules package-lock.json",
@@ -26,8 +27,8 @@
     "postcss": "^8.4.33",
     "rimraf": "^5.0.5",
     "sass": "^1.69.7",
-    "terser": "^5.44.1",
-    "vite": "^5.0.10"
+    "vite": "^5.0.10",
+    "vite-plugin-sass-glob-import": "^3.0.2"
   },
   "engines": {
     "node": ">=18.0.0",
