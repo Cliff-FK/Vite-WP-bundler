@@ -223,6 +223,11 @@ export const PATHS = {
 export const WATCH_PHP = process.env.WATCH_PHP !== 'false';
 
 /**
+ * Active le HMR Body Reset pour JavaScript si configuré (défaut: true)
+ */
+export const HMR_BODY_RESET = process.env.HMR_BODY_RESET !== 'false';
+
+/**
  * Liste des fichiers PHP à scanner pour détecter les enqueues
  * Par défaut: ['functions.php']
  * Exemple: ['functions.php', 'inc/enqueue.php', 'lib/assets.php']

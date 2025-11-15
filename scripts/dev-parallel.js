@@ -6,52 +6,35 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const bundlerRoot = resolve(__dirname, '..');
 
 /**
- * Démarrage parallèle optimisé :
- * 1. Génération du MU-plugin
- * 2. Démarrage de Vite en parallèle (ne dépend pas du MU-plugin)
+ * Démarrage du bundler :
+ * Le MU-plugin est maintenant généré automatiquement par le plugin Vite
+ * Ce script lance simplement Vite qui se charge de tout
  */
 
-console.log('🚀 Démarrage parallèle du bundler...\n');
+console.log('🚀 Démarrage du bundler Vite...\n');
 
-// Générer le MU-plugin en arrière-plan
-const muPluginProcess = spawn('node', ['plugins/generate-mu-plugin.js'], {
+// Démarrer Vite (le plugin generate-mu-plugin.plugin.js génère le MU-plugin automatiquement)
+const viteProcess = spawn('vite', [], {
   cwd: bundlerRoot,
   shell: true,
   stdio: 'inherit'
 });
 
-// Petit délai pour que le MU-plugin démarre en premier (non bloquant)
-setTimeout(() => {
-  // Démarrer Vite immédiatement après
-  const viteProcess = spawn('vite', [], {
-    cwd: bundlerRoot,
-    shell: true,
-    stdio: 'inherit'
-  });
+// Gérer les signaux de fermeture
+process.on('SIGINT', () => {
+  console.log('\n🛑 Arrêt du serveur de développement...');
+  viteProcess.kill('SIGINT');
+  process.exit(0);
+});
 
-  // Gérer les signaux de fermeture
-  process.on('SIGINT', () => {
-    console.log('\n🛑 Arrêt du serveur de développement...');
-    viteProcess.kill('SIGINT');
-    muPluginProcess.kill('SIGINT');
-    process.exit(0);
-  });
+process.on('SIGTERM', () => {
+  viteProcess.kill('SIGTERM');
+  process.exit(0);
+});
 
-  process.on('SIGTERM', () => {
-    viteProcess.kill('SIGTERM');
-    muPluginProcess.kill('SIGTERM');
-    process.exit(0);
-  });
-
-  viteProcess.on('exit', (code) => {
-    if (code !== 0) {
-      console.error(`❌ Vite s'est arrêté avec le code ${code}`);
-      process.exit(code);
-    }
-  });
-}, 100);
-
-muPluginProcess.on('error', (err) => {
-  console.error('❌ Erreur génération MU-plugin:', err);
-  process.exit(1);
+viteProcess.on('exit', (code) => {
+  if (code !== 0) {
+    console.error(`❌ Vite s'est arrêté avec le code ${code}`);
+    process.exit(code);
+  }
 });
