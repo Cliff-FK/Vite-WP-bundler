@@ -1,5 +1,5 @@
 import { defineConfig } from 'vite';
-import { PATHS, WATCH_PHP, BUILD_FOLDER } from './paths.config.js';
+import { PATHS, WATCH_PHP, BUILD_FOLDER, HMR_BODY_RESET } from './paths.config.js';
 import { postcssUrlRewrite } from './plugins/postcss-url-rewrite.plugin.js';
 import { phpReloadPlugin } from './plugins/php-reload.plugin.js';
 import {
@@ -9,6 +9,8 @@ import {
 } from './plugins/wordpress-assets-detector.plugin.js';
 import { portKillerPlugin } from './plugins/port-killer.plugin.js';
 import { cleanupMuPluginOnClose } from './plugins/cleanup-mu-plugin.plugin.js';
+import { acceptAllHMRPlugin } from './plugins/accept-all-hmr.plugin.js';
+import { generateMuPluginPlugin } from './plugins/generate-mu-plugin.js';
 import sassGlobImports from 'vite-plugin-sass-glob-import';
 import { resolve } from 'path';
 
@@ -75,6 +77,15 @@ export default defineConfig(async ({ command }) => {
   plugins: [
     // Plugin pour supporter les globs SCSS (@import "vendors/*.scss")
     sassGlobImports(),
+
+    // Plugin pour générer le MU-plugin WordPress à chaque démarrage du serveur (mode dev uniquement)
+    // Permet de prendre en compte les changements de .env (HMR_BODY_RESET, etc.) en live
+    ...(command === 'serve' ? [generateMuPluginPlugin()] : []),
+
+    // Plugin pour accepter automatiquement le HMR sur tous les modules JS du thème (mode dev uniquement)
+    // Empêche Vite de faire un full-reload et laisse hmr-body-reset.js gérer le HMR
+    // Activé seulement si HMR_BODY_RESET=true dans .env
+    ...(command === 'serve' && HMR_BODY_RESET ? [acceptAllHMRPlugin()] : []),
 
     // Plugin pour libérer automatiquement le port Vite en mode dev
     // Tue uniquement les processus Node.js qui bloquent VITE_PORT

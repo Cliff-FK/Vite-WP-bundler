@@ -1,75 +1,63 @@
-#!/usr/bin/env node
-
 /**
- * Script de génération du MU-plugin Vite Dev Mode pour WordPress
+ * Plugin Vite pour générer le MU-plugin WordPress à chaque démarrage du serveur
  *
- * Ce script:
- * 1. Scanne functions.php via detectAssetsFromWordPress()
- * 2. Génère un MU-plugin PHP qui injecte Vite et retire les build assets
- * 3. Copie le MU-plugin dans wp-content/mu-plugins/
- *
- * Avantages:
- * - Utilise le même scanner que le build (DRY)
- * - Pas de proxy complexe
- * - Hooks WordPress natifs
- * - Simple et maintenable
+ * Ce plugin:
+ * 1. S'exécute au démarrage du serveur Vite (buildStart hook)
+ * 2. Scanne functions.php pour détecter les assets
+ * 3. Génère le MU-plugin PHP avec la configuration actuelle de .env
+ * 4. Permet de prendre en compte les changements de .env en live
  */
 
 import { PATHS } from '../paths.config.js';
 import { detectAssetsFromWordPress } from './wordpress-assets-detector.plugin.js';
-import { mkdirSync, writeFileSync, existsSync, unlinkSync, rmdirSync, readdirSync } from 'fs';
+import { mkdirSync, writeFileSync, existsSync, unlinkSync, rmdirSync, readdirSync, readFileSync } from 'fs';
 import { resolve } from 'path';
-import chalk from 'chalk';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { platform } from 'os';
+import dotenv from 'dotenv';
 
 const execAsync = promisify(exec);
+
+// Flag pour ouvrir le navigateur une seule fois
+let browserOpened = false;
 
 // Chemins du MU-plugin
 const muPluginsPath = resolve(PATHS.wpRoot, 'wp-content/mu-plugins');
 const muPluginFile = resolve(muPluginsPath, 'vite-dev-mode.php');
 
-// 1. NETTOYER LE MU-PLUGIN ORPHELIN (si session précédente tuée brutalement)
-if (existsSync(muPluginFile)) {
-  unlinkSync(muPluginFile);
-}
-if (existsSync(muPluginsPath)) {
-  const files = readdirSync(muPluginsPath);
-  if (files.length === 0) {
-    rmdirSync(muPluginsPath);
+/**
+ * Recharge les variables d'environnement depuis .env
+ * Nécessaire car process.env est figé au démarrage du processus Node.js
+ */
+function reloadEnvVars() {
+  const envPath = resolve(PATHS.bundlerRoot, '.env');
+  if (!existsSync(envPath)) {
+    return { HMR_BODY_RESET: true }; // Valeur par défaut
   }
+
+  const envConfig = dotenv.parse(readFileSync(envPath, 'utf8'));
+  const HMR_BODY_RESET = envConfig.HMR_BODY_RESET !== 'false';
+
+  return { HMR_BODY_RESET };
 }
 
-// Détecter les assets depuis WordPress (utilise le même scanner que le build)
-const detectedAssets = await detectAssetsFromWordPress();
-const buildFolder = detectedAssets.buildFolder;
+/**
+ * Génère le contenu du MU-plugin PHP
+ */
+async function generateMuPluginContent() {
+  // Recharger les variables d'environnement depuis .env
+  const { HMR_BODY_RESET } = reloadEnvVars();
 
-// Extraire les sources par catégorie (front/admin/editor)
-const frontSources = detectedAssets.front.sources;
-const adminSources = detectedAssets.admin.sources;
-const editorSources = detectedAssets.editor.sources;
+  // Détecter les assets depuis WordPress
+  const detectedAssets = await detectAssetsFromWordPress();
+  const buildFolder = detectedAssets.buildFolder;
 
-// Construire l'URL WordPress
-const wpUrl = `${PATHS.wpProtocol}://${PATHS.wpHost}:${PATHS.wpPort}${PATHS.wpBasePath}`;
+  const frontSources = detectedAssets.front.sources;
+  const adminSources = detectedAssets.admin.sources;
+  const editorSources = detectedAssets.editor.sources;
 
-// Affichage de l'URL WordPress
-console.log(
-  chalk.bold('Ouvre:') + ' ' +
-  chalk.green(wpUrl)
-);
-
-// Ouvrir l'URL dans le navigateur par défaut
-const os = platform();
-const openCommand = os === 'win32' ? `start "" "${wpUrl}"` : os === 'darwin' ? `open "${wpUrl}"` : `xdg-open "${wpUrl}"`;
-try {
-  await execAsync(openCommand);
-} catch (err) {
-  // Silencieux en cas d'erreur
-}
-
-// 2. Générer le contenu du MU-plugin
-const muPluginContent = `<?php
+  return `<?php
 /**
  * Plugin Name: Vite Dev Mode
  * Description: Injecte les assets Vite en mode développement (généré automatiquement)
@@ -254,7 +242,15 @@ function vite_inject_front_assets() {
   // 1. Client Vite pour HMR
   echo '<script type="module" src="' . VITE_URL . '/@vite/client"></script>' . "\\n";
 
-  // 2. Assets sources (JS et SCSS)
+  // 2. HMR Body Reset Helper (injecté depuis le bundler - conditionnel)
+  ${HMR_BODY_RESET ? `\$bundlerPath = dirname(get_template_directory()) . '/../../vite-wp-bundler-main';
+  \$hmrHelperPath = \$bundlerPath . '/scripts/hmr-body-reset.js';
+  if (file_exists(\$hmrHelperPath)) {
+    \$hmrHelperUrl = VITE_URL . '/@fs/' . str_replace('\\\\', '/', \$hmrHelperPath);
+    echo '<script type="module" src="' . esc_url(\$hmrHelperUrl) . '"></script>' . "\\n";
+  }` : '// HMR Body Reset désactivé (HMR_BODY_RESET=false dans .env)'}
+
+  // 3. Assets sources (JS et SCSS)
   foreach (\$vite_front_sources as \$sourcePath) {
     \$themePath = get_template_directory();
     \$absolutePath = \$themePath . '/' . \$sourcePath;
@@ -289,33 +285,65 @@ function vite_inject_front_debug() {
 add_action('wp_head', 'vite_inject_front_assets', 1);
 add_action('wp_head', 'vite_inject_front_debug', 1);
 `;
-
-// 2. Créer le dossier mu-plugins si nécessaire
-if (!existsSync(muPluginsPath)) {
-  mkdirSync(muPluginsPath, { recursive: true });
 }
 
-// 3. Écrire le MU-plugin
-writeFileSync(muPluginFile, muPluginContent, 'utf8');
+/**
+ * Ouvre l'URL WordPress dans le navigateur (une seule fois)
+ */
+async function openBrowser() {
+  if (browserOpened) return;
+  browserOpened = true;
 
-// 5. Nettoyer le MU-plugin à l'arrêt (Ctrl+C)
-process.on('SIGINT', () => {
+  const wpUrl = `${PATHS.wpProtocol}://${PATHS.wpHost}:${PATHS.wpPort}${PATHS.wpBasePath}`;
+  console.log(`\n  Ouvre: ${wpUrl}\n`);
+
+  const os = platform();
+  const openCommand = os === 'win32' ? `start "" "${wpUrl}"` : os === 'darwin' ? `open "${wpUrl}"` : `xdg-open "${wpUrl}"`;
+
   try {
-    // Supprimer le fichier MU-plugin
-    if (existsSync(muPluginFile)) {
-      unlinkSync(muPluginFile);
-    }
-
-    // Supprimer le dossier mu-plugins s'il est vide
-    if (existsSync(muPluginsPath)) {
-      const files = readdirSync(muPluginsPath);
-      if (files.length === 0) {
-        rmdirSync(muPluginsPath);
-      }
-    }
+    await execAsync(openCommand);
   } catch (err) {
     // Silencieux en cas d'erreur
   }
+}
 
-  process.exit(0);
-});
+/**
+ * Plugin Vite pour générer le MU-plugin
+ */
+export function generateMuPluginPlugin() {
+  return {
+    name: 'generate-mu-plugin',
+
+    async buildStart() {
+      // Uniquement en mode dev (serve)
+      if (!this.meta?.watchMode) return;
+
+      console.log('Génération du MU-plugin WordPress...');
+
+      // Recharger les variables d'environnement
+      const { HMR_BODY_RESET } = reloadEnvVars();
+
+      // Nettoyer l'ancien MU-plugin s'il existe
+      if (existsSync(muPluginFile)) {
+        unlinkSync(muPluginFile);
+      }
+
+      // Générer le nouveau contenu
+      const muPluginContent = await generateMuPluginContent();
+
+      // Créer le dossier mu-plugins si nécessaire
+      if (!existsSync(muPluginsPath)) {
+        mkdirSync(muPluginsPath, { recursive: true });
+      }
+
+      // Écrire le MU-plugin
+      writeFileSync(muPluginFile, muPluginContent, 'utf8');
+
+      console.log(`   MU-plugin généré: wp-content/mu-plugins/vite-dev-mode.php`);
+      console.log(`   HMR_BODY_RESET = ${HMR_BODY_RESET}\n`);
+
+      // Ouvrir le navigateur (une seule fois)
+      await openBrowser();
+    }
+  };
+}

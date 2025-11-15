@@ -1,293 +1,558 @@
 # Vite WP Bundler
 
-Un bundler Vite.js moderne et optimisé pour WordPress avec Hot Module Replacement (HMR) et détection automatique des assets.
+Bundler Vite.js moderne pour WordPress avec HMR (Hot Module Replacement) intelligent et injection à la volée.
 
-## 🚀 Quick Start
-
-### 1. Installation
+## Quick Start
 
 ```bash
-cd vite-wp-bundler
+# 1. Installation
 npm install
+
+# 2. Configuration
+cp .env.example .env
+# Éditer .env et définir THEME_NAME=votre-theme
+
+# 3. Développement
+npm run dev
+
+# 4. Build production
+npm run build
 ```
 
-### 2. Configuration minimale
+Le bundler détecte automatiquement vos assets depuis `functions.php`, génère un MU-plugin WordPress pour l'injection HMR, et ouvre votre site WordPress dans le navigateur.
 
-Créez un fichier `.env` à la racine du dossier `vite-wp-bundler/` :
+---
 
-```env
-# Nom du thème à bundler (OBLIGATOIRE)
-THEME_NAME=votre-theme
+## Table des matières
+
+- [Fonctionnalités](#fonctionnalités)
+- [Architecture](#architecture)
+- [Configuration](#configuration)
+- [Développement](#développement)
+- [Build Production](#build-production)
+- [HMR Avancé](#hmr-avancé)
+- [Structure des fichiers](#structure-des-fichiers)
+- [Plugins Vite](#plugins-vite)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Fonctionnalités
+
+### Core
+- **Auto-détection des assets** : Scanne `functions.php` pour détecter automatiquement les JS/SCSS enregistrés
+- **HMR intelligent** : Hot Module Replacement sans rechargement complet de la page
+- **MU-Plugin automatique** : Génération et injection automatique du plugin WordPress pour le mode dev
+- **Watch PHP** : Rechargement automatique du navigateur lors de modifications PHP
+- **Zero-config** : Détection automatique de l'environnement WordPress (MAMP, Local, etc.)
+
+### HMR Body Reset (optionnel)
+- **Reset DOM** : Réinitialisation du `<body>` sans rechargement de page sur changements JS
+- **Préservation du scroll** : Maintient la position de scroll pendant le HMR
+- **Cleanup automatique** : Nettoyage des event listeners pour éviter les fuites mémoire
+- **Mode désactivable** : `HMR_BODY_RESET=false` pour utiliser le HMR natif de Vite
+
+### Build
+- **Minification intelligente** : `.min.js` et `.min.css` avec esbuild (rapide)
+- **Structure préservée** : Détection automatique de la structure (plate ou sous-dossiers)
+- **Sans hash** : Noms de fichiers stables pour WordPress
+- **Libs externes** : Support des librairies minifiées non bundlées
+
+---
+
+## Architecture
+
+```
+vite-wp-bundler-main/
+├── .env                      # Configuration environnement
+├── vite.config.js            # Configuration Vite
+├── paths.config.js           # Chemins auto-détectés
+├── plugins/                  # Plugins Vite personnalisés
+│   ├── generate-mu-plugin.js              # Génération MU-plugin WordPress
+│   ├── wordpress-assets-detector.plugin.js # Détection assets depuis functions.php
+│   ├── accept-all-hmr.plugin.js           # Injection HMR automatique
+│   ├── php-reload.plugin.js               # Rechargement PHP
+│   ├── port-killer.plugin.js              # Libération port Vite
+│   ├── cleanup-mu-plugin.plugin.js        # Nettoyage au shutdown
+│   ├── postcss-url-rewrite.plugin.js      # Réécriture URLs CSS
+│   ├── cache-manager.plugin.js            # Cache des assets détectés
+│   └── sass-glob-import.plugin.js         # Support @import "*.scss"
+└── scripts/
+    ├── dev-parallel.js       # Script de démarrage dev
+    └── hmr-body-reset.js     # Client HMR pour reset DOM
 ```
 
-C'est tout ! Les autres paramètres utilisent des valeurs par défaut intelligentes.
+### Workflow
 
-### 3. Lancement du mode développement
+**Mode développement** :
+1. `npm run dev` → Lance Vite via `scripts/dev-parallel.js`
+2. Plugin `generate-mu-plugin.js` :
+   - Détecte les assets depuis `functions.php`
+   - Génère `wp-content/mu-plugins/vite-dev-mode.php`
+   - Ouvre le navigateur WordPress
+3. Le MU-plugin injecte :
+   - Client Vite (`@vite/client`)
+   - Script HMR Body Reset (si `HMR_BODY_RESET=true`)
+   - Assets sources (JS/SCSS) via serveur Vite
+4. Vite sert les assets avec HMR actif
+
+**Mode production** :
+1. `npm run build` → Build Vite
+2. Plugin `wordpress-assets-detector` détecte la structure
+3. Rollup génère les `.min.js` et `.min.css`
+4. WordPress charge les assets buildés (pas de Vite)
+
+---
+
+## Configuration
+
+### `.env`
+
+```bash
+# ===================================================================
+# THÈME
+# ===================================================================
+THEME_NAME=themezero           # Nom du thème WordPress à bundler
+
+# ===================================================================
+# OPTIONS
+# ===================================================================
+WATCH_PHP=true                 # Rechargement auto sur changements PHP
+HMR_BODY_RESET=true           # HMR avec reset DOM (false = HMR natif Vite)
+
+# ===================================================================
+# SERVEURS (auto-détectés par défaut)
+# ===================================================================
+VITE_HOST=localhost
+VITE_PORT=5173
+
+WP_HOST=localhost
+WP_PROTOCOL=http
+WP_PORT=80
+
+# ===================================================================
+# AVANCÉ (optionnel)
+# ===================================================================
+# WEB_ROOT_FOLDER=htdocs       # Dossier racine web (défaut: htdocs)
+# WP_BASE_PATH=/mon-site       # Chemin de base WordPress
+# WP_THEMES_PATH=wp-content/themes
+# VITE_PHP_FILES=functions.php # Fichiers PHP à scanner
+```
+
+### Auto-détection
+
+Le bundler détecte automatiquement :
+- **Racine WordPress** : Cherche `wp-config.php` en remontant depuis le bundler
+- **Dossier web** : `htdocs`, `www`, `public_html`, etc.
+- **Serveur local** : MAMP, XAMPP, Local, Laragon
+- **Structure des assets** : Plate (`dist/`) ou avec sous-dossiers (`optimised/js/`, `optimised/css/`)
+
+---
+
+## Développement
+
+### Démarrage
 
 ```bash
 npm run dev
 ```
 
-Vite démarre et ouvre automatiquement votre site WordPress avec HMR actif.
+Cela va :
+1. Libérer le port 5173 si occupé
+2. Générer le MU-plugin WordPress
+3. Démarrer le serveur Vite
+4. Ouvrir le navigateur sur votre site WordPress
 
-### 4. Build de production
+### HMR - Comportement
+
+#### Avec `HMR_BODY_RESET=true` (défaut)
+- **JS modifié** → Reset du `<body>` + réinjection scripts (pas de reload page)
+- **SCSS/CSS modifié** → HMR CSS natif Vite (instantané)
+- **PHP modifié** → Rechargement complet de la page
+
+#### Avec `HMR_BODY_RESET=false`
+- **JS modifié** → Rechargement complet de la page (HMR natif Vite)
+- **SCSS/CSS modifié** → HMR CSS natif Vite (instantané)
+- **PHP modifié** → Rechargement complet de la page
+
+### Commandes
+
+```bash
+npm run dev              # Mode développement (génère MU-plugin + lance Vite)
+npm run dev:sequential   # Lance uniquement Vite (MU-plugin géré par plugin)
+npm run build            # Build production
+npm run preview          # Preview du build
+npm run clean            # Nettoie node_modules et package-lock
+npm run reinstall        # Réinstallation propre des dépendances
+```
+
+---
+
+## Build Production
 
 ```bash
 npm run build
 ```
 
-Les assets optimisés sont générés dans le dossier de build détecté automatiquement.
+### Détection automatique
 
----
+Le build détecte depuis `functions.php` :
+- **Assets à compiler** : `wp_enqueue_style()`, `wp_enqueue_script()`
+- **Dossier de build** : Via `get_template_directory_uri() . '/optimised/'` → `optimised/`
+- **Structure** : Plate (`dist/`) ou sous-dossiers (`optimised/js/`, `optimised/css/`)
 
-## 📖 Présentation
+### Output
 
-### Le problème
-
-Développer des thèmes WordPress modernes avec des outils comme Vite pose plusieurs défis :
-
-1. **Intégration complexe** : Connecter Vite à WordPress nécessite de la configuration manuelle
-2. **Détection des assets** : Difficile de synchroniser les assets enqueued dans `functions.php` avec Vite
-3. **HMR incompatible** : Le Hot Module Replacement ne fonctionne pas nativement avec WordPress
-4. **Build/Dev différents** : Les assets de dev et prod ont des chemins différents
-5. **Admin WordPress** : Les styles admin et Gutenberg nécessitent une gestion spéciale
-
-### La solution : Vite WP Bundler
-
-**Vite WP Bundler** résout ces problématiques avec une approche innovante basée sur la **détection automatique** et l'**injection intelligente**.
-
-#### Comment ça fonctionne ?
-
+**Structure avec sous-dossiers** :
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  1. DÉTECTION AUTOMATIQUE                                   │
-│     Scan de functions.php pour détecter les wp_enqueue_*()  │
-│     → Identifie automatiquement tous les assets du thème    │
-└─────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────┐
-│  2. MODE DEV : INJECTION VITE                               │
-│     • Génère un MU-plugin temporaire                        │
-│     • Retire les <link>/<script> de build du HTML          │
-│     • Injecte les assets sources via Vite HMR              │
-│     • Synchronise avec les iframes Gutenberg               │
-└─────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────┐
-│  3. MODE BUILD : PRODUCTION                                 │
-│     • Compile et minifie tous les assets détectés          │
-│     • Génère les fichiers .min.js et .min.css              │
-│     • Conserve la structure de dossiers du thème           │
-│     • Les wp_enqueue_*() chargent automatiquement le build │
-└─────────────────────────────────────────────────────────────┘
+wp-content/themes/votre-theme/
+└── optimised/              # Dossier détecté depuis functions.php
+    ├── css/
+    │   ├── style.min.css
+    │   └── admin.min.css
+    └── js/
+        ├── main.min.js
+        └── _libs/          # Libs externes non bundlées
+            └── swiper.min.js
 ```
 
-### Fonctionnalités clés
+**Structure plate** :
+```
+wp-content/themes/votre-theme/
+└── dist/                   # Dossier détecté depuis functions.php
+    ├── style.min.css
+    ├── admin.min.css
+    ├── main.min.js
+    └── _libs/
+        └── swiper.min.js
+```
 
-#### ✨ Zéro Configuration
-- **Auto-détection** des chemins WordPress (`htdocs`, `www`, `public_html`)
-- **Auto-découverte** des dossiers d'assets (`js`, `scss`, `css`, `dist`)
-- **Valeurs par défaut** intelligentes pour tous les paramètres
+### Libs externes
 
-#### 🔥 Hot Module Replacement
-- **HMR natif** pour JS, SCSS et CSS
-- **Reload automatique** des fichiers PHP (désactivable)
-- **Synchronisation iframe** Gutenberg en temps réel
+Les imports vers `_libs/`, `libs/`, `vendors/`, `vendor/` sont **externalisés** (non bundlés) et les chemins relatifs sont préservés :
 
-#### 🎯 Context-Aware
-- Détection automatique du contexte : `front`, `admin`, `both`
-- Injection conditionnelle des assets selon le contexte
-- Support complet de l'éditeur Gutenberg et des iframes
+```js
+// Source
+import Swiper from './_libs/swiper.min.js';
 
-#### 🏗️ Build Intelligent
-- **Structure préservée** : `scss/style.scss` → `css/style.min.css`
-- **Détection du dossier de build** (optimised, dist, build, etc.)
-- **Libs externes** non bundlées (référencées depuis le thème)
-
-#### 🧹 Propre et Automatique
-- **MU-plugin temporaire** créé au démarrage, supprimé à l'arrêt
-- **Pas de proxy** complexe, utilise les hooks WordPress natifs
-- **Nettoyage automatique** en cas d'interruption brutale
-
----
-
-## 🛠️ Workflow détaillé
-
-### Mode Développement (`npm run dev`)
-
-1. **Génération du MU-plugin**
-   - Scanne `functions.php` pour détecter les `wp_enqueue_style()` et `wp_enqueue_script()`
-   - Identifie le contexte de chaque asset (`front`, `admin`, `both`)
-   - Génère `wp-content/mu-plugins/vite-dev-mode.php`
-
-2. **Injection des assets Vite**
-   - Les assets de build sont retirés du HTML via `ob_start()`
-   - Les assets sources sont injectés via `<script type="module">`
-   - Le client Vite HMR est ajouté automatiquement
-
-3. **Synchronisation Gutenberg**
-   - Les styles Vite sont clonés dans l'iframe `editor-canvas`
-   - Un `MutationObserver` détecte les changements HMR
-   - Les styles sont propagés automatiquement
-
-4. **Rechargement PHP**
-   - Les modifications des fichiers PHP déclenchent un reload
-   - Debounce intelligent pour éviter les reloads multiples
-
-### Mode Build (`npm run build`)
-
-1. **Détection des entrées**
-   - Scanne les mêmes fichiers que le mode dev
-   - Génère les inputs Rollup dynamiquement
-
-2. **Compilation optimisée**
-   - SCSS → CSS compilé et minifié
-   - JS → ESM bundle minifié avec Terser
-   - Assets copiés (images, fonts) si nécessaire
-
-3. **Sortie structurée**
-   ```
-   wp-content/themes/votre-theme/
-   ├── js/
-   │   └── main.js              (source)
-   ├── scss/
-   │   └── style.scss           (source)
-   └── optimised/               (build)
-       ├── js/
-       │   └── main.min.js      (compilé)
-       └── css/
-           └── style.min.css    (compilé)
-   ```
-
----
-
-## ⚙️ Configuration avancée
-
-Toutes les variables sont **optionnelles** avec des valeurs par défaut intelligentes :
-
-```env
-# Chemin vers le dossier des thèmes (défaut: wp-content/themes)
-# WP_THEMES_PATH=wp-content/themes
-
-# Nom du thème à bundler (OBLIGATOIRE)
-THEME_NAME=votre-theme
-
-# Rechargement auto des fichiers PHP (défaut: true)
-# WATCH_PHP=false
-
-# Fichiers PHP à scanner (défaut: functions.php)
-# VITE_PHP_FILES=functions.php,inc/enqueue.php
-
-# Configuration serveur Vite
-VITE_HOST=localhost
-VITE_PORT=5173
-
-# Configuration WordPress
-WP_HOST=localhost
-WP_PROTOCOL=http
-WP_PORT=80
-
-# Dossier racine web pour auto-détection (défaut: htdocs)
-# WEB_ROOT_FOLDER=htdocs
-
-# Chemin de base WordPress si non auto-détectable
-# WP_BASE_PATH=/mon-site/wordpress
+// Build (dans optimised/js/main.min.js)
+import Swiper from '../../js/_libs/swiper.min.js'; // Chemin relatif préservé
 ```
 
 ---
 
-## 📦 Scripts disponibles
+## HMR Avancé
 
-| Commande | Description |
-|----------|-------------|
-| `npm run dev` | Lance Vite en mode développement avec HMR |
-| `npm run build` | Compile les assets pour la production |
-| `npm run preview` | Prévisualise le build de production |
-| `npm run clean` | Supprime node_modules et package-lock.json |
-| `npm run reinstall` | Nettoie et réinstalle les dépendances |
+### HMR Body Reset
+
+Script client (`scripts/hmr-body-reset.js`) injecté automatiquement quand `HMR_BODY_RESET=true`.
+
+#### Fonctionnement
+
+1. **Sauvegarde initiale** :
+   - HTML du `<body>`
+   - Scripts JS Vite sources
+   - Position du scroll
+
+2. **Détection HMR** :
+   - Écoute `vite:beforeUpdate`
+   - Filtre uniquement les updates `.js` (pas `.scss`, `.css`, ou `hmr-body-reset.js`)
+
+3. **Reset DOM** :
+   - Clone le `<body>` (supprime tous les event listeners)
+   - Réinjecte les scripts JS avec cache-bust (`?t=timestamp`)
+   - Restaure le HTML du body
+   - Déclenche `DOMContentLoaded` pour réinitialiser les modules
+   - Restaure la position du scroll
+
+#### Event Listeners
+
+Le script tracke automatiquement les listeners `window` et `document` :
+
+```js
+// Avant HMR
+window.addEventListener('scroll', handler);
+document.addEventListener('click', handler);
+
+// Après HMR → Listeners nettoyés automatiquement
+// Le code se réexécute et réattache de nouveaux listeners propres
+```
+
+#### Désactivation
+
+```bash
+# .env
+HMR_BODY_RESET=false
+```
+
+Le bundler passe automatiquement en HMR natif Vite (full reload sur changements JS).
+
+### Debug HMR
+
+Activer les logs détaillés dans `scripts/hmr-body-reset.js` :
+
+```js
+const DEBUG = true; // Ligne 19
+```
+
+Force un reset manuel dans la console :
+
+```js
+window.__VITE_HMR_RESET__();
+```
 
 ---
 
-## 🎯 Cas d'usage
+## Structure des fichiers
 
-### Assets front uniquement
+### Thème WordPress
+
+```
+wp-content/themes/votre-theme/
+├── functions.php           # Enregistrement des assets (wp_enqueue_*)
+├── js/
+│   ├── main.js            # Entry JS principal
+│   ├── modules/           # Modules JS
+│   └── _libs/             # Libs externes minifiées
+├── scss/
+│   ├── style.scss         # Entry SCSS principal
+│   ├── admin.scss         # SCSS admin (optionnel)
+│   └── vendors/           # Vendors SCSS
+└── optimised/             # Output build (généré)
+    ├── css/
+    │   └── style.min.css
+    └── js/
+        └── main.min.js
+```
+
+### Enregistrement WordPress
+
+Le bundler détecte automatiquement les assets depuis `functions.php` :
+
 ```php
-// functions.php
-wp_enqueue_style('theme-style', get_template_directory_uri() . '/scss/style.scss', [], null, 'front');
-wp_enqueue_script('theme-js', get_template_directory_uri() . '/js/main.js', [], null, true, 'front');
+// Front
+wp_enqueue_style('theme-style', get_template_directory_uri() . '/optimised/css/style.min.css');
+wp_enqueue_script('theme-main', get_template_directory_uri() . '/optimised/js/main.min.js');
+
+// Admin (pages WordPress uniquement, pas Vite)
+add_action('admin_enqueue_scripts', function() {
+  wp_enqueue_style('theme-admin', get_template_directory_uri() . '/optimised/css/admin.min.css');
+});
+
+// Editor (iframe Gutenberg, avec Vite HMR)
+add_action('enqueue_block_editor_assets', function() {
+  wp_enqueue_style('theme-editor', get_template_directory_uri() . '/optimised/css/editor.min.css');
+});
 ```
 
-### Assets admin uniquement (Gutenberg)
-```php
-// functions.php
-wp_enqueue_style('admin-style', get_template_directory_uri() . '/scss/admin.scss', [], null, 'admin');
+Le plugin détecte :
+- **Context** : `front`, `admin`, `editor`
+- **Build path** : `optimised/css/style.min.css` → source `scss/style.scss`
+- **Dossier build** : `optimised/`
+
+---
+
+## Plugins Vite
+
+### `generate-mu-plugin.js`
+
+Génère le MU-plugin WordPress à chaque démarrage du serveur Vite.
+
+**Rôle** :
+- Recharge `.env` dynamiquement (HMR_BODY_RESET pris en compte en live)
+- Détecte les assets depuis `functions.php`
+- Génère `wp-content/mu-plugins/vite-dev-mode.php`
+- Ouvre le navigateur WordPress
+
+**MU-Plugin généré** :
+- Dequeue les assets de build (front + editor)
+- Injecte les assets Vite (client HMR + sources JS/SCSS)
+- Conditionnel : `hmr-body-reset.js` si `HMR_BODY_RESET=true`
+
+### `wordpress-assets-detector.plugin.js`
+
+Détecte les assets enregistrés dans `functions.php`.
+
+**Détection** :
+- `wp_enqueue_style()`, `wp_enqueue_script()`
+- Context : `wp_enqueue_scripts` (front), `admin_enqueue_scripts` (admin), `enqueue_block_editor_assets` (editor)
+- Build folder : Via `get_template_directory_uri() . '/optimised/'`
+- Structure : Flat vs sous-dossiers
+
+**Conversion build → source** :
+```
+optimised/css/style.min.css → scss/style.scss
+optimised/js/main.min.js → js/main.js
 ```
 
-### Assets partagés (front + admin)
-```php
-// functions.php
-wp_enqueue_style('global', get_template_directory_uri() . '/scss/global.scss', [], null, 'both');
+**Cache** :
+Utilise `cache-manager.plugin.js` pour éviter de re-parser `functions.php` à chaque requête Vite.
+
+### `accept-all-hmr.plugin.js`
+
+Injecte automatiquement `import.meta.hot.accept()` dans tous les modules JS du thème.
+
+**Objectif** :
+Empêcher Vite de faire un full-reload quand un module ne définit pas `import.meta.hot.accept()`.
+
+**Injection** :
+```js
+// Injecté automatiquement dans chaque .js du thème
+if (import.meta.hot) {
+  import.meta.hot.accept(() => {
+    // Le script hmr-body-reset.js intercepte le changement
+  });
+}
+```
+
+**Condition** :
+Actif uniquement si `HMR_BODY_RESET=true` dans `.env`.
+
+### `php-reload.plugin.js`
+
+Surveille les fichiers PHP et déclenche un rechargement complet du navigateur.
+
+**Debounce intelligent** :
+- Groupe les changements PHP en 150ms
+- Évite les reloads multiples lors de sauvegardes multiples
+
+**Watch** :
+- `**/*.php` dans le thème WordPress
+- Désactivable via `WATCH_PHP=false` dans `.env`
+
+### `port-killer.plugin.js`
+
+Libère automatiquement le port Vite (5173) au démarrage si occupé.
+
+**Sécurité** :
+- Tue uniquement les processus Node.js (pas MAMP, Apache, etc.)
+- Ne tue jamais le processus actuel
+- Utilise PowerShell avec `-ErrorAction SilentlyContinue` (Windows)
+
+### `cleanup-mu-plugin.plugin.js`
+
+Nettoie le MU-plugin WordPress lors de l'arrêt du serveur Vite (Ctrl+C).
+
+**Cleanup** :
+- Supprime `wp-content/mu-plugins/vite-dev-mode.php`
+- Supprime le dossier `mu-plugins/` si vide
+
+**Signaux** :
+- `SIGINT` (Ctrl+C)
+- `SIGTERM` (kill)
+- `exit` (fermeture normale)
+
+### `postcss-url-rewrite.plugin.js`
+
+Réécrit les URLs relatives dans le CSS pour correspondre à la structure WordPress.
+
+**Dev** :
+```css
+/* Source SCSS */
+background: url('../images/hero.jpg');
+
+/* Servi par Vite */
+background: url('http://localhost:5173/@fs/C:/MAMP/.../themezero/images/hero.jpg');
+```
+
+**Build** :
+```css
+/* Source SCSS */
+background: url('../images/hero.jpg');
+
+/* Build (optimised/css/style.min.css) */
+background: url('../../images/hero.jpg'); /* Relatif depuis optimised/css/ vers images/ */
+```
+
+### `sass-glob-import.plugin.js`
+
+Support des imports globaux SCSS via `vite-plugin-sass-glob-import`.
+
+```scss
+@import "vendors/*.scss";   // Importe tous les .scss du dossier
+@import "modules/**/*.scss"; // Récursif
 ```
 
 ---
 
-## 🔧 Architecture technique
+## Troubleshooting
 
-### Structure du projet
+### Le serveur Vite ne démarre pas (port 5173 occupé)
 
-```
-vite-wp-bundler/
-├── .env                    # Configuration utilisateur
-├── package.json            # Dépendances et scripts
-├── vite.config.js          # Configuration Vite
-├── paths.config.js         # Auto-détection des chemins
-├── plugins/                # Plugins Vite custom
-│   ├── generate-mu-plugin.js           # Génération du MU-plugin
-│   ├── wordpress-assets-detector.plugin.js  # Détection des assets
-│   ├── php-reload.plugin.js            # Reload PHP
-│   ├── port-killer.plugin.js           # Nettoyage du port
-│   ├── cleanup-mu-plugin.plugin.js     # Nettoyage à l'arrêt
-│   └── postcss-url-rewrite.plugin.js   # Réécriture des URLs CSS
-└── README.md               # Documentation
+**Solution** : Le plugin `port-killer.plugin.js` devrait libérer le port automatiquement. Si ça ne fonctionne pas :
+
+```bash
+# Windows
+netstat -ano | findstr :5173
+taskkill /F /PID <PID>
+
+# Mac/Linux
+lsof -ti:5173 | xargs kill -9
 ```
 
-### Plugins Vite
+### HMR ne fonctionne pas
 
-- **wordpress-assets-detector** : Scanne `functions.php` et détecte les enqueues
-- **php-reload** : Watch les fichiers PHP et trigger un reload
-- **port-killer** : Libère le port Vite au démarrage
-- **cleanup-mu-plugin** : Supprime le MU-plugin à l'arrêt (Ctrl+C)
-- **postcss-url-rewrite** : Corrige les URLs relatives dans le CSS compilé
+**Vérifications** :
+1. `.env` : `HMR_BODY_RESET=true`
+2. Console navigateur : Vérifier les logs `[Vite HMR]`
+3. MU-plugin généré : `wp-content/mu-plugins/vite-dev-mode.php` existe
+4. Cache WordPress : Vider les caches (plugins de cache)
+
+**Debug** :
+```js
+// Dans scripts/hmr-body-reset.js
+const DEBUG = true; // Activer les logs détaillés
+
+// Console navigateur
+window.__VITE_HMR_RESET__(); // Force un reset manuel
+```
+
+### Les changements .env ne sont pas pris en compte
+
+**Solution** : Redémarrer le serveur Vite (`Ctrl+C` puis `npm run dev`).
+
+Le plugin `generate-mu-plugin.js` recharge `.env` au démarrage du serveur.
+
+### Build ne détecte pas mes assets
+
+**Vérifications** :
+1. `functions.php` : Les assets sont bien enregistrés avec `wp_enqueue_style()` / `wp_enqueue_script()`
+2. Chemins absolus : Utiliser `get_template_directory_uri()` (pas de chemins hardcodés)
+3. Cache : Supprimer `vite-wp-bundler-main/cache/` et rebuild
+
+**Debug** :
+```bash
+# Afficher les assets détectés
+npm run build
+# Regarder les logs : "Assets détectés: ..."
+```
+
+### PowerShell exit code 5
+
+**Cause** : Permissions insuffisantes pour tuer un processus.
+
+**Solution** : Le plugin `port-killer.plugin.js` utilise maintenant `-ErrorAction SilentlyContinue` pour ignorer silencieusement les erreurs.
+
+Si le problème persiste, libérer manuellement le port avant de lancer Vite.
+
+### Les assets de build apparaissent en double en dev
+
+**Cause** : Le MU-plugin ne dequeue pas correctement les assets.
+
+**Solution** :
+1. Vérifier que `vite-dev-mode.php` existe dans `wp-content/mu-plugins/`
+2. Vérifier les hooks `wp_enqueue_scripts` (priorité 9999 pour dequeue)
+3. Vider le cache WordPress
+4. Redémarrer Vite
 
 ---
 
-## 🚨 Notes importantes
-
-### MU-Plugin temporaire
-Le fichier `wp-content/mu-plugins/vite-dev-mode.php` est **généré automatiquement** en mode dev et **supprimé** à l'arrêt. Ne pas le modifier manuellement.
-
-### Compatibilité
-- **WordPress** : 5.0+
-- **Node.js** : 18+
-- **Gutenberg** : Support complet des iframes
-- **Environnement** : Windows, macOS, Linux
-
-### Limitations connues
-- Les styles dans l'iframe Gutenberg ne sont pas wrappés avec `.editor-styles-wrapper` en dev (différence mineure avec la prod)
-- Les libs minifiées externes ne sont pas bundlées (références relatives conservées)
-
----
-
-## 📄 Licence
+## Licence
 
 MIT
 
 ---
 
-## 🤝 Contribution
+## Support
 
-Les contributions sont les bienvenues ! N'hésitez pas à ouvrir une issue ou une pull request.
-
----
-
-**Vite WP Bundler** - Développement moderne pour WordPress 🚀
+Pour toute question ou problème, ouvrir une issue sur le repository.
