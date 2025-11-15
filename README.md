@@ -40,13 +40,12 @@ Le bundler détecte automatiquement vos assets depuis `functions.php`, génère 
 ## Fonctionnalités
 
 ### Core
-- **Auto-détection des assets** : Scanne `functions.php` pour détecter automatiquement les JS/SCSS enregistrés
-- **HMR intelligent** : Hot Module Replacement sans rechargement complet de la page
-- **MU-Plugin automatique** : Génération et injection automatique du plugin WordPress pour le mode dev
-- **Watch PHP** : Rechargement automatique du navigateur lors de modifications PHP
-- **Zero-config** : Détection automatique de l'environnement WordPress (MAMP, Local, etc.)
+- **Auto-détection des assets** : Scanne `functions.php` par défaut pour détecter automatiquement les JS/SCSS enregistrés
+- **HMR intelligent sur JS (optionnel)** : Reload du body sans rechargement de page sur changement Javascript
+- **Watch PHP (optionnel)** : Rechargement automatique du navigateur lors de modifications PHP
+- **Near Zero Config** : Détection automatique de l'environnement WordPress (MAMP, XAMPP, Local, etc.). uniquement dossier du thème à préciser dans le .env.
 
-### HMR Body Reset (optionnel)
+### HMR Body Reset Custom sur JS (optionnel):
 - **Reset DOM** : Réinitialisation du `<body>` sans rechargement de page sur changements JS
 - **Préservation du scroll** : Maintient la position de scroll pendant le HMR
 - **Cleanup automatique** : Nettoyage des event listeners pour éviter les fuites mémoire
@@ -63,7 +62,7 @@ Le bundler détecte automatiquement vos assets depuis `functions.php`, génère 
 ## Architecture
 
 ```
-vite-wp-bundler-main/
+vite-WP-bundler-main/
 ├── .env                      # Configuration environnement
 ├── vite.config.js            # Configuration Vite
 ├── paths.config.js           # Chemins auto-détectés
@@ -142,10 +141,10 @@ WP_PORT=80
 ### Auto-détection
 
 Le bundler détecte automatiquement :
-- **Racine WordPress** : Cherche `wp-config.php` en remontant depuis le bundler
+- **Racine WordPress** : les Paths se mettent à jour correctement.
 - **Dossier web** : `htdocs`, `www`, `public_html`, etc.
-- **Serveur local** : MAMP, XAMPP, Local, Laragon
-- **Structure des assets** : Plate (`dist/`) ou avec sous-dossiers (`optimised/js/`, `optimised/css/`)
+- **Serveur local** : MAMP, XAMPP, Local, Laragon, etc.
+- **Structure des assets** : pra défaut (`dist/`) si rien de trouvé, sinon nom du dossier identifié dans les enqueues (ex: `optimised/js/`, `optimised/css/`)
 
 ---
 
@@ -168,19 +167,17 @@ Cela va :
 #### Avec `HMR_BODY_RESET=true` (défaut)
 - **JS modifié** → Reset du `<body>` + réinjection scripts (pas de reload page)
 - **SCSS/CSS modifié** → HMR CSS natif Vite (instantané)
-- **PHP modifié** → Rechargement complet de la page
 
 #### Avec `HMR_BODY_RESET=false`
-- **JS modifié** → Rechargement complet de la page (HMR natif Vite)
+- **JS modifié** → Rechargement complet de la page (HMR natif Vite, sur un WP basique cela choisira très souvent un full reload)
 - **SCSS/CSS modifié** → HMR CSS natif Vite (instantané)
-- **PHP modifié** → Rechargement complet de la page
 
 ### Commandes
 
 ```bash
 npm run dev              # Mode développement (génère MU-plugin + lance Vite)
-npm run dev:sequential   # Lance uniquement Vite (MU-plugin géré par plugin)
 npm run build            # Build production
+
 npm run preview          # Preview du build
 npm run clean            # Nettoie node_modules et package-lock
 npm run reinstall        # Réinstallation propre des dépendances
@@ -305,29 +302,45 @@ window.__VITE_HMR_RESET__();
 
 ## Structure des fichiers
 
-### Thème WordPress
+⚠️ **Les exemples ci-dessous sont INDICATIFS uniquement.**
+Le bundler ne force AUCUNE convention - il détecte votre structure depuis `functions.php`.
+
+### Exemple de thème (votre architecture peut être totalement différente)
 
 ```
 wp-content/themes/votre-theme/
-├── functions.php           # Enregistrement des assets (wp_enqueue_*)
-├── js/
-│   ├── main.js            # Entry JS principal
-│   ├── modules/           # Modules JS
-│   └── _libs/             # Libs externes minifiées
-├── scss/
-│   ├── style.scss         # Entry SCSS principal
-│   ├── admin.scss         # SCSS admin (optionnel)
-│   └── vendors/           # Vendors SCSS
-└── optimised/             # Output build (généré)
-    ├── css/
-    │   └── style.min.css
-    └── js/
-        └── main.min.js
+├── functions.php           # ← SEUL FICHIER OBLIGATOIRE
+├── js/                     # Pourrait être : scripts/, src/js/, assets/js/, etc.
+│   ├── main.js
+│   └── _libs/              # Pourrait être : libs/, vendors/, vendor/, etc.
+└── scss/                   # Pourrait être : css/, styles/, sass/, etc.
+    └── style.scss
 ```
 
-### Enregistrement WordPress
+### Ce que le bundler détecte AUTOMATIQUEMENT
 
-Le bundler détecte automatiquement les assets depuis `functions.php` :
+Le bundler analyse vos `wp_enqueue_style()` et `wp_enqueue_script()` pour déduire :
+
+**✓ Dossiers sources** :
+- Le bundler détecte automatiquement vos dossiers JS et CSS
+- Exemples JS : `js/`, `scripts/`, `src/js/`, `assets/js/`, `javascript/`, ou tout autre nom
+- Exemples CSS : `scss/`, `css/`, `styles/`, `sass/`, `stylesheets/`, ou tout autre nom
+
+**✓ Dossiers de build** :
+- Le bundler détecte automatiquement votre dossier de build
+- Exemples : `dist/`, `build/`, `optimised/`, `assets/`, `public/`, `compiled/`, ou tout autre nom
+
+**✓ Dossiers de libs** :
+- Le bundler détecte automatiquement tout dossier de librairies externes
+- Exemples : `_libs/`, `libs/`, `vendors/`, `vendor/`, `libraries/`, ou tout autre nom
+
+**✓ Structure plate ou sous-dossiers** :
+- Plate : `dist/style.min.css`, `dist/main.min.js`
+- Sous-dossiers : `dist/css/style.min.css`, `dist/js/main.min.js`
+
+→ **Aucune convention imposée, tout est reverse-engineered depuis vos appels WordPress.**
+
+### Exemple d'enregistrement WordPress
 
 ```php
 // Front
@@ -345,9 +358,9 @@ add_action('enqueue_block_editor_assets', function() {
 });
 ```
 
-Le plugin détecte :
+Le bundler déduit de cet exemple :
 - **Context** : `front`, `admin`, `editor`
-- **Build path** : `optimised/css/style.min.css` → source `scss/style.scss`
+- **Conversion** : `optimised/css/style.min.css` → source `scss/style.scss`
 - **Dossier build** : `optimised/`
 
 ---
@@ -518,7 +531,7 @@ Le plugin `generate-mu-plugin.js` recharge `.env` au démarrage du serveur.
 **Vérifications** :
 1. `functions.php` : Les assets sont bien enregistrés avec `wp_enqueue_style()` / `wp_enqueue_script()`
 2. Chemins absolus : Utiliser `get_template_directory_uri()` (pas de chemins hardcodés)
-3. Cache : Supprimer `vite-wp-bundler-main/cache/` et rebuild
+3. Cache : Supprimer `vite-WP-bundler-main/cache/` et rebuild
 
 **Debug** :
 ```bash
