@@ -144,7 +144,7 @@ Le bundler détecte automatiquement :
 - **Racine WordPress** : les Paths se mettent à jour correctement.
 - **Dossier web** : `htdocs`, `www`, `public_html`, etc.
 - **Serveur local** : MAMP, XAMPP, Local, Laragon, etc.
-- **Structure des assets** : pra défaut (`dist/`) si rien de trouvé, sinon nom du dossier identifié dans les enqueues (ex: `optimised/js/`, `optimised/css/`)
+- **Structure des assets** : par défaut (`dist/`) si rien de trouvé, sinon nom du dossier identifié dans les enqueues (ex: `optimised/js/`, `optimised/css/`)
 
 ---
 
