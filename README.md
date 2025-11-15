@@ -1,4 +1,4 @@
-# Vite WP Bundler
+# Vite WP Bundler 🐓
 
 Bundler Vite.js moderne pour WordPress avec HMR (Hot Module Replacement) intelligent et injection à la volée.
 
