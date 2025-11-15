@@ -9,7 +9,7 @@ Bundler Vite.js moderne pour WordPress avec HMR (Hot Module Replacement) intelli
 npm install
 
 # 2. Configuration
-cp .env.example .env
+cp .env
 # Éditer .env et définir THEME_NAME=votre-theme
 
 # 3. Développement
