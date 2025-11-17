@@ -25,7 +25,7 @@ npm run dev
 npm run build
 ```
 
-Le bundler détecte automatiquement vos assets depuis `functions.php`, génère un MU-plugin WordPress pour l'injection HMR, et ouvre votre site WordPress dans le navigateur. Le MU-plugin est retiré quand le 'npm run dev' est arrêté (au Ctrl+C, sur le kill processus ou en quittant votre logiciel de code)
+Le bundler détecte automatiquement vos assets depuis `functions.php`, génère un MU-plugin WordPress pour l'injection HMR, et ouvre votre site WordPress dans le navigateur. Le MU-plugin est retiré quand le 'npm run dev' est arrêté (au Ctrl+C, sur le kill processus ou en quittant votre logiciel de code). Prérequis de fait: tout fichier css ou js devant être écouté par vite doit être enqueue proprement dans WP (correspond à 99% des cas normalement)**.
 
 ---
 
