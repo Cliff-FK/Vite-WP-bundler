@@ -1,10 +1,14 @@
 # Vite WP Bundler 🐓
 
 Bundler Vite.js moderne pour WordPress avec HMR (Hot Module Replacement) intelligent et injection à la volée.
+Dossier à placer à la racine d'un Wordpress (la où se trouve wp-config.php par exemple).
 
 ## Quick Start
 
 ```bash
+# 0. Go into folder
+cd vite-wp-bundler/
+
 # 1. Installation
 npm install
 
