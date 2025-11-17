@@ -1,20 +1,22 @@
 # Vite WP Bundler 🐓
 
 Bundler Vite.js moderne pour WordPress avec HMR (Hot Module Replacement) intelligent et injection à la volée.
-Dossier à placer à la racine d'un Wordpress (la où se trouve wp-config.php par exemple).
+Dossier de bundle plug-&-play à placer à la racine d'un Wordpress (la où se trouve wp-config.php par exemple).
 
 ## Quick Start
 
 ```bash
-# 0. Go into folder
+# 0. Accéder au dossier de bundle
 cd vite-wp-bundler/
 
 # 1. Installation
 npm install
 
 # 2. Configuration
-cp .env
+Ouvrir le fichier env
 # Éditer .env et définir THEME_NAME=votre-theme
+# (Optionnel) modifier HOST et PORT selon votre config local
+# (Optionnel) modifier les quelques options disponibles
 
 # 3. Développement
 npm run dev
@@ -23,7 +25,7 @@ npm run dev
 npm run build
 ```
 
-Le bundler détecte automatiquement vos assets depuis `functions.php`, génère un MU-plugin WordPress pour l'injection HMR, et ouvre votre site WordPress dans le navigateur.
+Le bundler détecte automatiquement vos assets depuis `functions.php`, génère un MU-plugin WordPress pour l'injection HMR, et ouvre votre site WordPress dans le navigateur. Le MU-plugin est retiré quand le 'npm run dev' est arrêté (au Ctrl+C, sur le kill processus ou en quittant votre logiciel de code)
 
 ---
 
@@ -44,22 +46,22 @@ Le bundler détecte automatiquement vos assets depuis `functions.php`, génère 
 ## Fonctionnalités
 
 ### Core
-- **Auto-détection des assets** : Scanne `functions.php` par défaut pour détecter automatiquement les JS/SCSS enregistrés
-- **HMR intelligent sur JS (optionnel)** : Reload du body sans rechargement de page sur changement Javascript
-- **Watch PHP (optionnel)** : Rechargement automatique du navigateur lors de modifications PHP
-- **Near Zero Config** : Détection automatique de l'environnement WordPress (MAMP, XAMPP, Local, etc.). uniquement dossier du thème à préciser dans le .env.
+- **Auto-détection des assets** : Scanne `functions.php` par défaut pour détecter automatiquement les JS/SCSS enregistrés. Possibilité de scanner plus de fichiers (réglage dans .env)
+- **HMR intelligent sur JS (optionnel)** : Reload du `<body>` (destroy total et re-init html/js) sans rechargement de page sur changement Javascript
+- **Watch PHP (optionnel)** : Rechargement automatique du navigateur lors de modifications d'un fichier PHP (tout fichier du thème, pas ailleurs)
+- **Near Zero Config** : Détection automatique de l'environnement WordPress (MAMP, XAMPP, Local, etc.). Uniquement dossier du thème à préciser dans le .env, au minimum.
 
 ### HMR Body Reset Custom sur JS (optionnel):
-- **Reset DOM** : Réinitialisation du `<body>` sans rechargement de page sur changements JS
+- **Reset DOM** : Réinitialisation du `<body>` (destroy total et re-init html/js) sans rechargement de page sur changements JS
 - **Préservation du scroll** : Maintient la position de scroll pendant le HMR
-- **Cleanup automatique** : Nettoyage des event listeners pour éviter les fuites mémoire
+- **Cleanup automatique** : Nettoyage des éventuels listeners hors `<body>` pour éviter les fuites mémoire
 - **Mode désactivable** : `HMR_BODY_RESET=false` pour utiliser le HMR natif de Vite
 
 ### Build
 - **Minification intelligente** : `.min.js` et `.min.css` avec esbuild (rapide)
 - **Structure préservée** : Détection automatique de la structure (plate ou sous-dossiers)
+- **Libs externes** : Librairies minifiées seront non bundlées. Lon concaténer dans le .min.js final
 - **Sans hash** : Noms de fichiers stables pour WordPress
-- **Libs externes** : Support des librairies minifiées non bundlées
 
 ---
 
@@ -97,6 +99,7 @@ vite-WP-bundler-main/
    - Client Vite (`@vite/client`)
    - Script HMR Body Reset (si `HMR_BODY_RESET=true`)
    - Assets sources (JS/SCSS) via serveur Vite
+   - Rappel: MU-plugin supprimé si mode dev arrêté
 4. Vite sert les assets avec HMR actif
 
 **Mode production** :
@@ -139,16 +142,16 @@ WP_PORT=80
 # WEB_ROOT_FOLDER=htdocs       # Dossier racine web (défaut: htdocs)
 # WP_BASE_PATH=/mon-site       # Chemin de base WordPress
 # WP_THEMES_PATH=wp-content/themes
-# VITE_PHP_FILES=functions.php # Fichiers PHP à scanner
+# VITE_PHP_FILES=functions.php # Fichiers PHP à scanner (Paths à partir du thème, séparés par une virgule)
 ```
 
 ### Auto-détection
 
 Le bundler détecte automatiquement :
-- **Racine WordPress** : les Paths se mettent à jour correctement.
+- **Racine WordPress** : les Paths se mettent à jour correctement suivant la racine.
 - **Dossier web** : `htdocs`, `www`, `public_html`, etc.
 - **Serveur local** : MAMP, XAMPP, Local, Laragon, etc.
-- **Structure des assets** : par défaut (`dist/`) si rien de trouvé, sinon nom du dossier identifié dans les enqueues (ex: `optimised/js/`, `optimised/css/`)
+- **Structure des assets** : par défaut (`dist/`) si rien n'est trouvé de viable, sinon nom du dossier identifié dans les enqueues (ex: `optimised/js/`, `optimised/css/`)
 
 ---
 
@@ -161,7 +164,7 @@ npm run dev
 ```
 
 Cela va :
-1. Libérer le port 5173 si occupé
+1. Libérer le port VITE_PORT (par défaut 5173) si occupé
 2. Générer le MU-plugin WordPress
 3. Démarrer le serveur Vite
 4. Ouvrir le navigateur sur votre site WordPress
@@ -169,12 +172,12 @@ Cela va :
 ### HMR - Comportement
 
 #### Avec `HMR_BODY_RESET=true` (défaut)
-- **JS modifié** → Reset du `<body>` + réinjection scripts (pas de reload page)
-- **SCSS/CSS modifié** → HMR CSS natif Vite (instantané)
+- **JS modifié** → Reset du `<body>` par destoy + reinjection du body initial + réinjection scripts (conséquence: re-init le js)
+- **SCSS/CSS modifié** → HMR CSS natif Vite quasi instantané
 
 #### Avec `HMR_BODY_RESET=false`
 - **JS modifié** → Rechargement complet de la page (HMR natif Vite, sur un WP basique cela choisira très souvent un full reload)
-- **SCSS/CSS modifié** → HMR CSS natif Vite (instantané)
+- **SCSS/CSS modifié** → HMR CSS natif Vite quasi instantané
 
 ### Commandes
 
@@ -198,7 +201,7 @@ npm run build
 ### Détection automatique
 
 Le build détecte depuis `functions.php` :
-- **Assets à compiler** : `wp_enqueue_style()`, `wp_enqueue_script()`
+- **Assets à compiler** : `wp_enqueue_style()`, `wp_enqueue_script()`, etc.
 - **Dossier de build** : Via `get_template_directory_uri() . '/optimised/'` → `optimised/`
 - **Structure** : Plate (`dist/`) ou sous-dossiers (`optimised/js/`, `optimised/css/`)
 
@@ -260,15 +263,14 @@ Script client (`scripts/hmr-body-reset.js`) injecté automatiquement quand `HMR_
    - Filtre uniquement les updates `.js` (pas `.scss`, `.css`, ou `hmr-body-reset.js`)
 
 3. **Reset DOM** :
-   - Clone le `<body>` (supprime tous les event listeners)
+   - Re-init le HTMl du `<body>` (supprime tous les event listeners)
    - Réinjecte les scripts JS avec cache-bust (`?t=timestamp`)
-   - Restaure le HTML du body
-   - Déclenche `DOMContentLoaded` pour réinitialiser les modules
+   - Le/les scripts réinjectés à pour conséquence de relancer tout type de js.
    - Restaure la position du scroll
 
 #### Event Listeners
 
-Le script tracke automatiquement les listeners `window` et `document` :
+Pour les éventuels events/timer js hors body, Le script tracke automatiquement les listeners `window` et `document` :
 
 ```js
 // Avant HMR
@@ -276,7 +278,7 @@ window.addEventListener('scroll', handler);
 document.addEventListener('click', handler);
 
 // Après HMR → Listeners nettoyés automatiquement
-// Le code se réexécute et réattache de nouveaux listeners propres
+// Le js se réexécute et réattache de nouveaux listeners propres
 ```
 
 #### Désactivation
@@ -287,20 +289,6 @@ HMR_BODY_RESET=false
 ```
 
 Le bundler passe automatiquement en HMR natif Vite (full reload sur changements JS).
-
-### Debug HMR
-
-Activer les logs détaillés dans `scripts/hmr-body-reset.js` :
-
-```js
-const DEBUG = true; // Ligne 19
-```
-
-Force un reset manuel dans la console :
-
-```js
-window.__VITE_HMR_RESET__();
-```
 
 ---
 
