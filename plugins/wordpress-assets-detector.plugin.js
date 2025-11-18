@@ -2,7 +2,7 @@ import { PATHS, PHP_FILES_TO_SCAN } from '../paths.config.js';
 import { existsSync, copyFileSync, mkdirSync, readFileSync, openSync, readSync, closeSync } from 'fs';
 import { resolve, dirname } from 'path';
 import chalk from 'chalk';
-import { getCachedAssets, saveCachedAssets } from './cache-manager.plugin.js';
+import { getCachedAssets, saveCachedAssets, deleteOldBuildFolder } from './cache-manager.plugin.js';
 
 // Cache en mémoire des assets détectés pour éviter le double scan dans la même session
 let cachedAssets = null;
@@ -20,7 +20,14 @@ export async function detectAssetsFromWordPress() {
   }
 
   // 2. Cache persistent (fichier .cache/)
-  const persistentCache = getCachedAssets();
+  const { assets: persistentCache, oldBuildFolder } = getCachedAssets();
+
+  // Si un ancien buildFolder existe et est différent du nouveau, le supprimer
+  if (oldBuildFolder && !persistentCache) {
+    // Le cache est invalide, on va régénérer
+    // On garde l'ancien buildFolder pour le comparer après détection
+  }
+
   if (persistentCache) {
     cachedAssets = persistentCache;
     return cachedAssets;
@@ -57,6 +64,18 @@ export async function detectAssetsFromWordPress() {
 
     const functionsContent = allPhpContent;
 
+    // 1. PARSER LES CONSTANTES PHP (define()) pour construire une map de chemins
+    const phpConstants = {};
+    const defineRegex = /define\s*\(\s*['"]([\w_]+)['"]\s*,\s*get_template_directory(?:_uri)?\(\)\s*\.\s*['"]([^'"]+)['"]\s*\)/g;
+    let defineMatch;
+    while ((defineMatch = defineRegex.exec(functionsContent)) !== null) {
+      const constantName = defineMatch[1]; // Ex: JS_PATH, OPTI_PATH_URI
+      const relativePath = defineMatch[2]; // Ex: /assets/js/, /optimised/
+      phpConstants[constantName] = relativePath.replace(/^\/|\/$/g, ''); // Nettoyer les / au début/fin
+    }
+
+    // console.log('Constantes PHP détectées:', phpConstants);
+
     // Détecter buildFolder depuis les constantes PHP OU utiliser la détection auto
     let buildFolder = PATHS.assetFolders.dist; // Utiliser la détection dynamique en priorité
     const buildFolderMatch = functionsContent.match(/define\s*\(\s*['"]OPTI_PATH(?:_URI)?\s*['"]\s*,\s*[^'"]*['"]([^'"]+)\//);
@@ -85,10 +104,20 @@ export async function detectAssetsFromWordPress() {
       const hasIframeCheck = /\$_GET\s*\[\s*['"]context['"]\s*\]\s*===\s*['"]iframe['"]/.test(functionBody);
 
       // Extraire tous les scripts enqueued dans ce bloc
-      const scriptRegex = /wp_(?:register|enqueue)_script\s*\([^,]+,\s*(?:OPTI_PATH(?:_URI)?\s*\.\s*)?['"](js\/[^'"]+\.js)['"]/g;
+      // Capture: wp_enqueue_script('name', CONSTANT_NAME . 'path/file.js') ou directement 'path/file.js'
+      const scriptRegex = /wp_(?:register|enqueue)_script\s*\([^,]+,\s*(?:([\w_]+)\s*\.\s*)?['"]([^'"]+\.js)['"]/g;
       let match;
       while ((match = scriptRegex.exec(functionBody)) !== null) {
-        let scriptPath = match[1];
+        const constantUsed = match[1]; // Ex: OPTI_PATH_URI, JS_PATH, etc.
+        let scriptPath = match[2]; // Le chemin capturé
+
+        // console.log('Script détecté:', { constantUsed, scriptPath, hook });
+
+        // Si une constante PHP est utilisée, préfixer avec le chemin correspondant
+        if (constantUsed && phpConstants[constantUsed]) {
+          scriptPath = phpConstants[constantUsed] + '/' + scriptPath;
+          // console.log('  → Chemin reconstruit:', scriptPath);
+        }
 
         // Ignorer les URLs externes
         if (scriptPath.startsWith('http')) continue;
@@ -144,10 +173,16 @@ export async function detectAssetsFromWordPress() {
       const hasIframeCheck = /\$_GET\s*\[\s*['"]context['"]\s*\]\s*===\s*['"]iframe['"]/.test(functionBody);
 
       // Extraire tous les styles enqueued dans ce bloc
-      const styleRegex = /wp_(?:register|enqueue)_style\s*\([^,]+,\s*(?:OPTI_PATH(?:_URI)?\s*\.\s*)?['"]([^'"]+\.(?:css|scss))['"]/g;
+      const styleRegex = /wp_(?:register|enqueue)_style\s*\([^,]+,\s*(?:([\w_]+)\s*\.\s*)?['"]([^'"]+\.(?:css|scss))['"]/g;
       let match;
       while ((match = styleRegex.exec(functionBody)) !== null) {
-        let stylePath = match[1];
+        const constantUsed = match[1];
+        let stylePath = match[2];
+
+        // Si une constante PHP est utilisée, préfixer avec le chemin correspondant
+        if (constantUsed && phpConstants[constantUsed]) {
+          stylePath = phpConstants[constantUsed] + '/' + stylePath;
+        }
 
         if (stylePath.startsWith('http')) continue;
 
@@ -190,10 +225,17 @@ export async function detectAssetsFromWordPress() {
     }
 
     // Gérer add_editor_style() séparément (sans hook)
-    const editorStyleRegex = /add_editor_style\s*\(\s*(?:OPTI_PATH(?:_URI)?\s*\.\s*)?['"]([^'"]+\.(?:css|scss))['"]/g;
+    const editorStyleRegex = /add_editor_style\s*\(\s*(?:([\w_]+)\s*\.\s*)?['"]([^'"]+\.(?:css|scss))['"]/g;
     let editorMatch;
     while ((editorMatch = editorStyleRegex.exec(functionsContent)) !== null) {
-      let stylePath = editorMatch[1];
+      const constantUsed = editorMatch[1];
+      let stylePath = editorMatch[2];
+
+      // Si une constante PHP est utilisée, préfixer avec le chemin correspondant
+      if (constantUsed && phpConstants[constantUsed]) {
+        stylePath = phpConstants[constantUsed] + '/' + stylePath;
+      }
+
       if (stylePath.startsWith('http')) continue;
       stylePath = convertBuildToSourcePath(stylePath);
       if (!assets.editor.styles.includes(stylePath)) {
@@ -203,6 +245,11 @@ export async function detectAssetsFromWordPress() {
 
     // Séparer sources vs libs pour chaque contexte
     const result = categorizeAssets(assets);
+
+    // Si buildFolder a changé, supprimer l'ancien
+    if (oldBuildFolder && oldBuildFolder !== result.buildFolder) {
+      deleteOldBuildFolder(oldBuildFolder);
+    }
 
     // Mettre en cache (mémoire + persistent)
     cachedAssets = result;
@@ -244,52 +291,57 @@ function convertBuildToSourcePath(path) {
     }
   }
 
-  // CAS 1: Fichier .min.js ou .min.css
-  if (pathWithoutBuild.match(/\.min\.(js|css)$/)) {
-    const ext = pathWithoutBuild.match(/\.min\.js$/) ? 'js' : 'css';
+  // Helper function: cherche un fichier par son nom dans le thème (ignore les chemins)
+  function findSourceByFilename(originalPath) {
+    // Extraire le nom de fichier (ex: js/main.min.js → main)
+    const filename = originalPath
+      .split('/').pop()           // Garder seulement le nom de fichier
+      .replace(/\.min\.(js|css)$/, '.$1')  // Retirer .min
+      .replace(/\.(js|css)$/, '');         // Retirer extension
 
-    // Tenter de retirer .min pour trouver la source
-    const sourcePath = pathWithoutBuild.replace(new RegExp(`\\.min\\.${ext}$`), `.${ext}`);
+    // console.log(`  → Recherche de fichiers nommés: ${filename}.{js,css,scss}`);
 
-    // Vérifier si la version non-minifiée existe
-    const sourceAbsolutePath = resolve(PATHS.themePath, sourcePath);
-    if (existsSync(sourceAbsolutePath)) {
-      // La source existe → utiliser la source (sera bundlée)
-      pathWithoutBuild = sourcePath;
-    } else {
-      // La source n'existe pas → SI C'EST UN CSS, tester .scss
-      if (ext === 'css') {
-        const scssPath = sourcePath
-          .replace(/(^|\/)css\//, '$1scss/')
-          .replace(/\.css$/, '.scss');
+    // Extensions possibles à chercher (source > build)
+    const extensionsToSearch = [];
+    if (originalPath.endsWith('.js') || originalPath.endsWith('.min.js')) {
+      extensionsToSearch.push('.js');
+    }
+    if (originalPath.endsWith('.css') || originalPath.endsWith('.min.css')) {
+      extensionsToSearch.push('.scss', '.css');
+    }
 
-        const scssAbsolutePath = resolve(PATHS.themePath, scssPath);
-        if (existsSync(scssAbsolutePath)) {
-          return scssPath;
+    // Dossiers où chercher - utiliser les dossiers détectés dynamiquement
+    const foldersToSearch = [
+      PATHS.assetFolders.js,
+      PATHS.assetFolders.css,
+      PATHS.assetFolders.scss,
+    ].filter(Boolean); // Retirer les valeurs undefined/null
+
+    // Chercher dans tous les dossiers avec toutes les extensions
+    for (const folder of foldersToSearch) {
+      for (const ext of extensionsToSearch) {
+        const searchPath = `${folder}/${filename}${ext}`;
+        const absolutePath = resolve(PATHS.themePath, searchPath);
+
+        if (existsSync(absolutePath)) {
+          // console.log(`  ✓ Trouvé: ${searchPath}`);
+          return searchPath;
         }
       }
-
-      // Aucune source trouvée → garder le .min tel quel (sera copié)
-      return pathWithoutBuild;
-    }
-  }
-
-  // CAS 2: Fichier .css (non-minifié) → tenter conversion vers .scss
-  if (pathWithoutBuild.match(/\.css$/)) {
-    const scssPath = pathWithoutBuild
-      .replace(/(^|\/)css\//, '$1scss/')
-      .replace(/\.css$/, '.scss');
-
-    const scssAbsolutePath = resolve(PATHS.themePath, scssPath);
-    if (existsSync(scssAbsolutePath)) {
-      return scssPath;
     }
 
-    // Si .scss n'existe pas, garder le .css tel quel (sera bundlé)
-    return pathWithoutBuild;
+    // console.log(`  ✗ Aucune source trouvée pour: ${filename}`);
+    return null;
   }
 
-  // CAS 3: Fichier .js (non-minifié) → garder tel quel
+  // Chercher le fichier source par son nom (ignore les chemins)
+  const foundSource = findSourceByFilename(pathWithoutBuild);
+  if (foundSource) {
+    return foundSource;
+  }
+
+  // Aucune source trouvée → garder le chemin tel quel (sera copié si existe, ou erreur)
+  // console.log(`  → Garde le chemin d'origine: ${pathWithoutBuild}`);
   return pathWithoutBuild;
 }
 
@@ -446,8 +498,10 @@ export function detectBuildStructure() {
     };
   }
 
-  const hasJsSubfolder = existsSync(resolve(buildPath, PATHS.assetFolders.js));
-  const hasCssSubfolder = existsSync(resolve(buildPath, PATHS.assetFolders.css));
+  // Chercher les sous-dossiers js/ et css/ dans le dossier de build
+  // (PAS les chemins sources - juste 'js' et 'css' comme noms de dossiers)
+  const hasJsSubfolder = existsSync(resolve(buildPath, 'js'));
+  const hasCssSubfolder = existsSync(resolve(buildPath, 'css'));
 
   return {
     isFlat: !hasJsSubfolder && !hasCssSubfolder,

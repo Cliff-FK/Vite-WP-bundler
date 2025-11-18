@@ -71,7 +71,7 @@ const THEME_PATH_FULL = `${WP_THEMES_PATH}/${THEME_NAME}`;
 
 /**
  * Auto-détecte les dossiers d'assets en scannant le système de fichiers
- * Cherche les dossiers contenant des fichiers .js, .scss, .css
+ * Cherche RÉCURSIVEMENT les dossiers contenant des fichiers .js, .scss, .css
  * ET détecte le dossier de build en identifiant les dossiers qui NE SONT PAS des sources
  */
 function detectAssetFolders() {
@@ -83,44 +83,74 @@ function detectAssetFolders() {
   }
 
   try {
-    const dirs = readdirSync(themePath, { withFileTypes: true })
-      .filter(d => d.isDirectory())
-      .map(d => d.name);
+    const ignoreDirs = ['node_modules', 'vendor', '.git', '.vite', 'inc', 'includes', 'languages', 'acf-json'];
+
+    // Fonction récursive pour scanner les dossiers
+    function findFolderWithExtension(basePath, extensions, excludeMinified = false, maxDepth = 3, currentDepth = 0) {
+      if (currentDepth >= maxDepth) return null;
+
+      const dirs = readdirSync(basePath, { withFileTypes: true })
+        .filter(d => d.isDirectory() && !ignoreDirs.includes(d.name))
+        .map(d => d.name);
+
+      for (const dir of dirs) {
+        const dirPath = join(basePath, dir);
+
+        try {
+          const files = readdirSync(dirPath);
+          const hasMatchingFiles = files.some(f => {
+            const matchesExt = extensions.some(ext => f.endsWith(ext));
+            const isNotMinified = excludeMinified ? !f.endsWith('.min.js') && !f.endsWith('.min.css') : true;
+            return matchesExt && isNotMinified;
+          });
+
+          if (hasMatchingFiles) {
+            // Retourner le chemin relatif depuis themePath
+            // Normaliser les slashes pour Windows
+            const normalizedDirPath = dirPath.replace(/\\/g, '/');
+            const normalizedThemePath = themePath.replace(/\\/g, '/');
+            return normalizedDirPath.replace(normalizedThemePath + '/', '');
+          }
+
+          // Chercher récursivement dans les sous-dossiers
+          const subResult = findFolderWithExtension(dirPath, extensions, excludeMinified, maxDepth, currentDepth + 1);
+          if (subResult) {
+            return subResult;
+          }
+        } catch (err) {
+          // Ignorer les erreurs de lecture
+        }
+      }
+
+      return null;
+    }
 
     const sourceFolders = new Set();
 
-    // Chercher dossier contenant .js
-    for (const dir of dirs) {
-      const dirPath = join(themePath, dir);
-      const files = readdirSync(dirPath);
-      if (files.some(f => f.endsWith('.js') && !f.endsWith('.min.js'))) {
-        folders.js = dir;
-        sourceFolders.add(dir.toLowerCase());
-        break;
-      }
+    // Chercher dossier contenant .js (récursif, max 3 niveaux)
+    const jsFolder = findFolderWithExtension(themePath, ['.js'], true);
+    if (jsFolder) {
+      folders.js = jsFolder;
+      sourceFolders.add(jsFolder.toLowerCase());
     }
 
-    // Chercher dossier contenant .scss
-    for (const dir of dirs) {
-      const dirPath = join(themePath, dir);
-      const files = readdirSync(dirPath);
-      if (files.some(f => f.endsWith('.scss'))) {
-        folders.scss = dir;
-        sourceFolders.add(dir.toLowerCase());
-        break;
-      }
+    // Chercher dossier contenant .scss (récursif)
+    const scssFolder = findFolderWithExtension(themePath, ['.scss'], false);
+    if (scssFolder) {
+      folders.scss = scssFolder;
+      sourceFolders.add(scssFolder.toLowerCase());
     }
 
-    // Chercher dossier contenant .css
-    for (const dir of dirs) {
-      const dirPath = join(themePath, dir);
-      const files = readdirSync(dirPath);
-      if (files.some(f => f.endsWith('.css') && !f.endsWith('.min.css'))) {
-        folders.css = dir;
-        sourceFolders.add(dir.toLowerCase());
-        break;
-      }
+    // Chercher dossier contenant .css (récursif)
+    const cssFolder = findFolderWithExtension(themePath, ['.css'], true);
+    if (cssFolder) {
+      folders.css = cssFolder;
+      sourceFolders.add(cssFolder.toLowerCase());
     }
+
+    const dirs = readdirSync(themePath, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name);
 
     // Détecter le dossier de build : tout dossier qui n'est PAS un dossier source
     // ni un dossier système/WordPress courant
@@ -238,7 +268,7 @@ export const PHP_FILES_TO_SCAN = process.env.VITE_PHP_FILES
 
 /**
  * Dossier de destination du build
- * Par défaut: 'optimised' (détectable automatiquement depuis functions.php)
+ * Null pour utiliser la détection automatique depuis functions.php
  */
-export const BUILD_FOLDER = 'optimised';
+export const BUILD_FOLDER = null;
 

@@ -11,10 +11,13 @@ import { portKillerPlugin } from './plugins/port-killer.plugin.js';
 import { cleanupMuPluginOnClose } from './plugins/cleanup-mu-plugin.plugin.js';
 import { acceptAllHMRPlugin } from './plugins/accept-all-hmr.plugin.js';
 import { generateMuPluginPlugin } from './plugins/generate-mu-plugin.js';
+import { copyMinifiedLibsPlugin } from './plugins/copy-minified-libs.plugin.js';
 import sassGlobImports from 'vite-plugin-sass-glob-import';
 import { resolve } from 'path';
 
 export default defineConfig(async ({ command }) => {
+  // console.log('[Vite Config] Command:', command);
+
   let buildFolder = BUILD_FOLDER || PATHS.assetFolders.dist;
   let rollupInputs = {};
   let detectedAssets = null;
@@ -22,11 +25,13 @@ export default defineConfig(async ({ command }) => {
 
   // En mode build, détecter les assets depuis WordPress
   if (command === 'build') {
-    console.log('Détection des assets depuis WordPress...');
+    // console.log('[Vite Config] Mode build détecté, lancement du scan...');
     detectedAssets = await detectAssetsFromWordPress();
 
     // Utiliser BUILD_FOLDER en priorité, puis détection, puis fallback
     buildFolder = BUILD_FOLDER || detectedAssets.buildFolder || PATHS.assetFolders.dist;
+    // Retirer le slash de début si présent (pour que resolve() fonctionne correctement)
+    buildFolder = buildFolder.replace(/^\//, '');
     rollupInputs = generateRollupInputs(detectedAssets);
 
     // Détecter la structure du dossier de build (flat vs sous-dossiers)
@@ -94,27 +99,26 @@ export default defineConfig(async ({ command }) => {
     // Plugin pour nettoyer le MU-plugin quand Vite s'arrête (Ctrl+C)
     ...(command === 'serve' ? [cleanupMuPluginOnClose()] : []),
 
-    // Plugin pour charger les libs minifiées sans transformation
-    {
-      name: 'load-minified-libs',
+    // Plugin pour charger les libs minifiées sans transformation (uniquement en mode dev)
+    ...(command === 'serve' ? [{
+      name: 'load-minified-libs-dev',
       enforce: 'pre',
       async resolveId(source, importer) {
-        // Si c'est un import de lib minifiée depuis main.js
-        if (source.startsWith('./_libs/') && source.endsWith('.min.js') && importer) {
+        // Détecter les imports de fichiers .min.js (relatifs)
+        if (source.endsWith('.min.js') && importer) {
           const { dirname } = await import('path');
-          // Résoudre le chemin absolu (resolve est déjà importé en haut du fichier)
           return resolve(dirname(importer), source);
         }
       },
       async load(id) {
-        if (id.includes('_libs') && id.endsWith('.min.js')) {
+        // Charger les fichiers .min.js sans transformation
+        if (id.endsWith('.min.js')) {
           const { readFileSync } = await import('fs');
           const code = readFileSync(id, 'utf-8');
-          // Retourner le code brut sans transformation
           return { code, map: null };
         }
       },
-    },
+    }] : []),
 
     // Plugin personnalisé de reload PHP avec debounce intelligent
     // Évite les reloads multiples en groupant les changements
@@ -140,8 +144,8 @@ export default defineConfig(async ({ command }) => {
         }
       },
       transform(code, id) {
-        if (id.endsWith('.min.js') || id.includes('_libs')) {
-          // Supprimer toute référence aux sourcemaps dans le code
+        // Supprimer les sourcemaps des fichiers minifiés
+        if (id.endsWith('.min.js')) {
           const cleanCode = code.replace(/\/\/# sourceMappingURL=.*/g, '').replace(/\/\*# sourceMappingURL=.*\*\//g, '');
           return {
             code: cleanCode,
@@ -213,14 +217,14 @@ export default defineConfig(async ({ command }) => {
       // PostCSS s'en occupe après via postcssUrlRewrite
       makeAbsoluteExternalsRelative: false,
 
-      // Entrées dynamiques détectées depuis WordPress (build) ou fallback
-      input: command === 'build' && Object.keys(rollupInputs).length > 0
-        ? rollupInputs
-        : {
-            // Fallback : pointer vers les sources réelles du thème
-            'js-main': resolve(PATHS.themePath, 'js/main.js'),
-            'css-style': resolve(PATHS.themePath, 'scss/style.scss'),
-          },
+      // Plugins Rollup
+      plugins: [
+        // Copier les fichiers .min.js dans le dossier de build
+        copyMinifiedLibsPlugin(),
+      ],
+
+      // Entrées dynamiques détectées depuis WordPress
+      input: rollupInputs,
       output: {
         // Format ESM pour les modules modernes
         format: 'es',
@@ -248,65 +252,57 @@ export default defineConfig(async ({ command }) => {
           if (assetInfo.name && assetInfo.name.endsWith('.css')) {
             // Extraire le nom sans le préfixe du dossier
             // Le séparateur § est utilisé pour préserver les tirets dans les noms
-            // Ex: css§style.css → style, css§admin.css → admin
+            // Ex: scss§style.css → style, css§admin.css → admin, assets/scss§style.css → style
             // Ex: css-compiled§theme-2024.css → theme-2024 (préserve les tirets)
             const baseName = assetInfo.name
               .replace('.css', '')
-              .replace(new RegExp(`^${PATHS.assetFolders.css}§`), '');
+              .split('§').pop();  // Retirer tout ce qui est avant le § (quel que soit le dossier source)
 
             // Support des structures plates et avec sous-dossiers
             if (buildStructure && buildStructure.isFlat) {
               // Structure plate : pas de sous-dossiers CSS
               return `${baseName}.min.css`;
             }
-            // Structure avec sous-dossiers CSS
-            return `${PATHS.assetFolders.css}/${baseName}.min.css`;
+            // Structure avec sous-dossiers CSS - utiliser buildFolder dynamique
+            return `css/${baseName}.min.css`;
           }
           return '[name].min.[ext]';
         },
-        // Réécrire les chemins des imports externes (libs)
-        // Support dynamique des différents patterns de dossiers de libs
+        // Réécrire les chemins des imports externes (.min.js)
+        // Les fichiers sont copiés à plat dans le dossier de sortie
         paths: (id) => {
           const normalizedPath = id.replace(/\\/g, '/');
 
-          // Détecter dynamiquement le pattern de lib
-          // Patterns supportés : _libs, libs, lib, vendors, vendor
-          const libFolderMatch = normalizedPath.match(/\/(vendors?|_?libs?)\//);
-
-          if (libFolderMatch) {
-            const libFolder = libFolderMatch[1];
-            const fileName = normalizedPath.split(`/${libFolder}/`).pop();
-
-            // Calculer la profondeur relative depuis le build folder
-            // Ex: optimised/js/ → remonter de 2 niveaux (buildFolder + js/)
-            // Ex: dist/ (flat) → remonter de 1 niveau
-            let upLevels = '../../'; // Par défaut : 2 niveaux (buildFolder/js/)
-
-            if (buildStructure && buildStructure.isFlat) {
-              // Structure plate : remonter de 1 seul niveau
-              upLevels = '../';
-            }
-
-            // Retourner le chemin relatif depuis le build vers le dossier de lib source
-            return `${upLevels}${PATHS.assetFolders.js}/${libFolder}/${fileName}`;
+          // Traiter uniquement les imports .min.js (libs externes)
+          if (!normalizedPath.endsWith('.min.js')) {
+            return id;
           }
 
-          return id;
+          // Extraire juste le nom de fichier
+          const fileName = normalizedPath.split('/').pop();
+
+          // Retourner le chemin relatif depuis le fichier bundlé vers le fichier copié
+          // Les fichiers .min.js sont dans le même dossier que les fichiers bundlés
+          return `./${fileName}`;
         },
       },
       // Marquer les dépendances externes (non incluses dans le bundle)
-      external: [
-        'jquery',
-        'desandro-matches-selector',
-        'ev-emitter',
-        'get-size',
-        'fizzy-ui-utils',
-        'outlayer',
-        // Détecter dynamiquement les imports vers des dossiers de libs
-        // Patterns communs : _libs, libs, lib, vendors, vendor, node_modules
-        // Utiliser une regex pour compatibilité avec le CSS build de Vite
-        /\/(vendors?|_?libs?|node_modules)\//
-      ],
+      external: (id) => {
+        // Détecter les libs par patterns de noms de packages NPM
+        const libPackages = ['jquery', 'desandro-matches-selector', 'ev-emitter', 'get-size', 'fizzy-ui-utils', 'outlayer'];
+        if (libPackages.includes(id)) return true;
+
+        // Normaliser le chemin
+        const normalizedId = id.replace(/\\/g, '/');
+
+        // Détecter node_modules
+        if (normalizedId.includes('/node_modules/')) return true;
+
+        // Détecter les fichiers .min.js (libs externes)
+        if (normalizedId.endsWith('.min.js')) return true;
+
+        return false;
+      },
       // Supprimer les warnings de sourcemaps manquantes
       onwarn(warning, warn) {
         if (warning.code === 'SOURCEMAP_ERROR') return;
