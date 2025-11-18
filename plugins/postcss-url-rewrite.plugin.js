@@ -5,8 +5,8 @@ import { relative, dirname, join } from 'path';
  * Plugin PostCSS pour réécrire les URLs dans le CSS compilé
  * S'exécute APRÈS la compilation SCSS, quand les url() sont déjà résolues
  *
- * MODE DEV et BUILD : Utilise des URLs absolues WordPress pour garantir
- * la compatibilité frontend, backend, et iframes
+ * Utilise des chemins relatifs depuis le fichier CSS généré vers dist/
+ * Compatible avec tout domaine (dev, staging, prod)
  */
 export function postcssUrlRewrite(mode = 'development', buildConfig = {}) {
   const isDev = mode === 'development' || mode === 'serve';
@@ -16,26 +16,32 @@ export function postcssUrlRewrite(mode = 'development', buildConfig = {}) {
 
     // Hook qui traite chaque déclaration CSS
     Declaration(decl, { result }) {
+      // En mode dev, ne rien faire - laisser les chemins sources inchangés
+      // Les symlinks permettent à Apache de servir directement depuis sources/
+      if (isDev) {
+        return;
+      }
+
       // Traiter uniquement les déclarations qui contiennent url()
       if (!decl.value || !decl.value.includes('url(')) {
         return;
       }
 
-      // Utiliser toujours l'URL WordPress absolue (dev ET build)
-      // Cela garantit que les assets fonctionnent partout : frontend, backend, iframes
-      const themeAssetsBase = `${PATHS.wpUrl}/${PATHS.themePathRelative}`;
-
       // Marquer les URLs déjà transformées pour éviter les doublons
       const processed = new Set();
 
-      // 1. Réécrire les URLs relatives avec remontées de dossiers (../)
+      // 1. Réécrire les URLs relatives avec remontées de dossiers (../../images/...)
+      //    En prod : dist/css/style.css → ../../images/ devient ../images/
+      //    Car les assets sont copiés dans dist/images/
       decl.value = decl.value.replace(
         /url\((['"]?)((?:\.\.\/)+)([^'")\s]+)(['"]?)\)/g,
         (fullMatch, _quote1, _dots, path) => {
           if (processed.has(fullMatch)) return fullMatch;
           processed.add(fullMatch);
-          // Dev et Build : toujours utiliser l'URL WordPress absolue
-          return `url("${themeAssetsBase}/${path}")`;
+
+          // Chemins relatifs depuis dist/css/ vers dist/images|fonts|inc
+          // ../../images/svg/ico.svg → ../images/svg/ico.svg
+          return `url("../${path}")`;
         }
       );
 
@@ -48,8 +54,8 @@ export function postcssUrlRewrite(mode = 'development', buildConfig = {}) {
             return fullMatch;
           }
           processed.add(fullMatch);
-          // Dev et Build : toujours utiliser l'URL WordPress absolue
-          return `url("${themeAssetsBase}/${path}")`;
+          // Chemins relatifs depuis dist/css/
+          return `url("../${path}")`;
         }
       );
 
@@ -60,12 +66,8 @@ export function postcssUrlRewrite(mode = 'development', buildConfig = {}) {
           if (processed.has(fullMatch)) return fullMatch;
           processed.add(fullMatch);
 
-          // Si le chemin pointe déjà vers le thème, construire l'URL complète
-          if (path.startsWith(PATHS.themePathRelative)) {
-            return `url("${PATHS.wpUrl}/${path}")`;
-          }
-          // Sinon, utiliser la base du thème
-          return `url("${themeAssetsBase}/${path}")`;
+          // Chemins relatifs depuis dist/css/
+          return `url("../${path}")`;
         }
       );
     },

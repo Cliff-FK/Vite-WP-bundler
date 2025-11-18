@@ -206,11 +206,66 @@ function detectAssetFolders() {
 
 const detectedFolders = detectAssetFolders();
 
+/**
+ * Détecte dynamiquement les dossiers d'assets statiques
+ */
+function detectStaticAssetFolders() {
+  const themePath = resolve(WP_ROOT, THEME_PATH_FULL);
+  const folders = { images: null, fonts: null, includes: null, includesDest: null };
+
+  try {
+    const themeFiles = readdirSync(themePath, { withFileTypes: true });
+
+    // Chercher un dossier contenant images
+    const imagesFolders = themeFiles.filter(f =>
+      f.isDirectory() && (f.name === 'sources' || f.name === 'assets' || f.name === 'src')
+    );
+    for (const folder of imagesFolders) {
+      const folderPath = resolve(themePath, folder.name);
+      const subFiles = readdirSync(folderPath, { withFileTypes: true });
+      if (subFiles.some(f => f.isDirectory() && f.name === 'images')) {
+        folders.images = `${folder.name}/images`;
+        break;
+      }
+    }
+
+    // Chercher un dossier contenant fonts
+    for (const folder of imagesFolders) {
+      const folderPath = resolve(themePath, folder.name);
+      const subFiles = readdirSync(folderPath, { withFileTypes: true });
+      if (subFiles.some(f => f.isDirectory() && f.name === 'fonts')) {
+        folders.fonts = `${folder.name}/fonts`;
+        break;
+      }
+    }
+
+    // Chercher un dossier includes/inc
+    if (themeFiles.some(f => f.isDirectory() && f.name === 'includes')) {
+      folders.includes = 'includes';
+      folders.includesDest = 'inc';
+    } else if (themeFiles.some(f => f.isDirectory() && f.name === 'inc')) {
+      folders.includes = 'inc';
+      folders.includesDest = 'inc';
+    }
+
+  } catch (err) {
+    // Silencieux
+  }
+
+  return folders;
+}
+
+const detectedStaticFolders = detectStaticAssetFolders();
+
 const ASSET_FOLDERS = {
   dist: detectedFolders.dist,
   js: detectedFolders.js,
   css: detectedFolders.css,
   scss: detectedFolders.scss,
+  images: detectedStaticFolders.images,
+  fonts: detectedStaticFolders.fonts,
+  includes: detectedStaticFolders.includes,
+  includesDest: detectedStaticFolders.includesDest,
 };
 
 export const PATHS = {
@@ -256,6 +311,11 @@ export const WATCH_PHP = process.env.WATCH_PHP !== 'false';
  * Active le HMR Body Reset pour JavaScript si configuré (défaut: true)
  */
 export const HMR_BODY_RESET = process.env.HMR_BODY_RESET !== 'false';
+
+/**
+ * Active l'auto-incrément de la version du thème à la fermeture du mode dev (défaut: true)
+ */
+export const AUTO_INCREMENT_VERSION = process.env.AUTO_INCREMENT_VERSION !== 'false';
 
 /**
  * Liste des fichiers PHP à scanner pour détecter les enqueues

@@ -12,6 +12,7 @@ import { cleanupMuPluginOnClose } from './plugins/cleanup-mu-plugin.plugin.js';
 import { acceptAllHMRPlugin } from './plugins/accept-all-hmr.plugin.js';
 import { generateMuPluginPlugin } from './plugins/generate-mu-plugin.js';
 import { copyMinifiedLibsPlugin } from './plugins/copy-minified-libs.plugin.js';
+import { copyStaticAssetsPlugin } from './plugins/copy-static-assets.plugin.js';
 import sassGlobImports from 'vite-plugin-sass-glob-import';
 import { resolve } from 'path';
 
@@ -48,7 +49,7 @@ export default defineConfig(async ({ command }) => {
   // Base URL pour les assets
   base: '/',
 
-  // Désactiver publicDir car on va servir les assets du thème directement
+  // Désactiver publicDir (on gère les assets via middleware)
   publicDir: false,
 
   // Configuration du serveur de développement
@@ -82,6 +83,11 @@ export default defineConfig(async ({ command }) => {
   plugins: [
     // Plugin pour supporter les globs SCSS (@import "vendors/*.scss")
     sassGlobImports(),
+
+    // Plugin pour copier les assets statiques
+    // Dev : copie tout à la racine du thème (./images, ./inc) pour Apache
+    // Build : scanne et copie seulement ce qui est utilisé dans dist/
+    copyStaticAssetsPlugin(command),
 
     // Plugin pour générer le MU-plugin WordPress à chaque démarrage du serveur (mode dev uniquement)
     // Permet de prendre en compte les changements de .env (HMR_BODY_RESET, etc.) en live
