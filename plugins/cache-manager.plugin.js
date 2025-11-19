@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'fs';
 import { createHash } from 'crypto';
 import { resolve, dirname } from 'path';
 import { PATHS, PHP_FILES_TO_SCAN } from '../paths.config.js';
@@ -66,23 +66,26 @@ function writeCache(data) {
 
 /**
  * Récupère les assets depuis le cache ou retourne null si invalide
+ * Retourne aussi l'ancien buildFolder s'il existe
  */
 export function getCachedAssets() {
   const currentHash = calculatePhpFilesHash();
   const cache = readCache();
 
   if (!cache) {
-    return null;
+    return { assets: null, oldBuildFolder: null };
   }
 
   // Vérifier si le hash correspond
   if (cache.hash !== currentHash) {
-    console.log('Fichiers PHP modifiés, régénération du cache...');
-    return null;
+    // console.log('Fichiers PHP modifiés, régénération du cache...');
+    // console.log('  Hash ancien:', cache.hash);
+    // console.log('  Hash nouveau:', currentHash);
+    return { assets: null, oldBuildFolder: cache.assets?.buildFolder || null };
   }
 
-  console.log('Cache valide, chargement instantané');
-  return cache.assets;
+  // console.log('Cache valide, chargement instantané');
+  return { assets: cache.assets, oldBuildFolder: null };
 }
 
 /**
@@ -111,6 +114,26 @@ export async function invalidateCache() {
       console.log('Cache invalidé');
     } catch (error) {
       console.warn('Impossible de supprimer le cache:', error.message);
+    }
+  }
+}
+
+/**
+ * Supprime un ancien dossier de build
+ */
+export function deleteOldBuildFolder(oldBuildFolder) {
+  if (!oldBuildFolder) return;
+
+  // Retirer le slash de début
+  const cleanFolder = oldBuildFolder.replace(/^\//, '');
+  const oldBuildPath = resolve(PATHS.themePath, cleanFolder);
+
+  if (existsSync(oldBuildPath)) {
+    try {
+      rmSync(oldBuildPath, { recursive: true, force: true });
+      console.log(`Ancien dossier de build supprimé: ${cleanFolder}/`);
+    } catch (error) {
+      console.warn(`Impossible de supprimer ${cleanFolder}/:`, error.message);
     }
   }
 }
