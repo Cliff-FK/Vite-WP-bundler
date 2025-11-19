@@ -257,6 +257,30 @@ function detectStaticAssetFolders() {
 
 const detectedStaticFolders = detectStaticAssetFolders();
 
+/**
+ * Détecte le dossier parent commun des assets statiques
+ * Ex: si images = "sources/images" et fonts = "sources/fonts" → retourne "sources"
+ */
+function detectPublicDir() {
+  const folders = [
+    detectedStaticFolders.images,
+    detectedStaticFolders.fonts,
+  ].filter(Boolean);
+
+  if (folders.length === 0) return null;
+
+  // Extraire le premier segment (dossier parent)
+  const firstSegments = folders.map(f => f.split('/')[0]);
+
+  // Si tous les dossiers partagent le même parent, le retourner
+  const commonParent = firstSegments[0];
+  if (firstSegments.every(seg => seg === commonParent)) {
+    return commonParent;
+  }
+
+  return null; // Pas de dossier parent commun
+}
+
 const ASSET_FOLDERS = {
   dist: detectedFolders.dist,
   js: detectedFolders.js,
@@ -266,6 +290,7 @@ const ASSET_FOLDERS = {
   fonts: detectedStaticFolders.fonts,
   includes: detectedStaticFolders.includes,
   includesDest: detectedStaticFolders.includesDest,
+  publicDir: detectPublicDir(), // Nouveau: dossier parent pour publicDir de Vite
 };
 
 export const PATHS = {

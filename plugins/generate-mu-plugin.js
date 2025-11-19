@@ -27,6 +27,30 @@ const muPluginsPath = resolve(PATHS.wpRoot, 'wp-content/mu-plugins');
 const muPluginFile = resolve(muPluginsPath, 'vite-dev-mode.php');
 
 /**
+ * Supprime le MU-plugin Vite (pour mode build)
+ * Si le dossier mu-plugins est vide après suppression, le supprimer aussi
+ */
+export function deleteMuPlugin() {
+  if (existsSync(muPluginFile)) {
+    try {
+      unlinkSync(muPluginFile);
+
+      // Vérifier si le dossier mu-plugins est vide
+      if (existsSync(muPluginsPath)) {
+        const files = readdirSync(muPluginsPath);
+
+        // Si vide, supprimer le dossier
+        if (files.length === 0) {
+          rmdirSync(muPluginsPath);
+        }
+      }
+    } catch (err) {
+      // Silencieux
+    }
+  }
+}
+
+/**
  * Recharge les variables d'environnement depuis .env
  * Nécessaire car process.env est figé au démarrage du processus Node.js
  */
@@ -74,6 +98,64 @@ async function generateMuPluginContent() {
 define('VITE_DEV_MODE', true);
 define('VITE_URL', '${PATHS.viteUrl}');
 define('VITE_PORT', ${PATHS.vitePort});
+
+/**
+ * Auto-destruction si Vite n'est pas accessible
+ * Vérifie que le serveur Vite répond avant d'injecter les assets
+ * Si Vite est down, supprime ce MU-plugin automatiquement
+ *
+ * Système de cache pour éviter de vérifier à chaque milliseconde
+ */
+function vite_check_server_and_cleanup() {
+  // Cache de vérification (5 secondes)
+  static $lastCheck = 0;
+  static $lastResult = null;
+
+  $now = time();
+
+  // Si on a vérifié il y a moins de 5 secondes, retourner le résultat en cache
+  if ($lastCheck > 0 && ($now - $lastCheck) < 5) {
+    return $lastResult;
+  }
+
+  // Vérifier si Vite répond via une socket TCP directe (plus rapide que file_get_contents)
+  $socket = @fsockopen('localhost', VITE_PORT, $errno, $errstr, 2);
+
+  if ($socket === false) {
+    // Vite ne répond pas - se supprimer
+    $muPluginFile = __FILE__;
+    $muPluginsDir = dirname($muPluginFile);
+
+    // Supprimer ce fichier
+    @unlink($muPluginFile);
+
+    // Si le dossier mu-plugins est vide, le supprimer aussi
+    $files = @scandir($muPluginsDir);
+    if ($files && count($files) <= 2) { // . et .. seulement
+      @rmdir($muPluginsDir);
+    }
+
+    // Mettre en cache le résultat
+    $lastCheck = $now;
+    $lastResult = false;
+
+    return false;
+  }
+
+  // Vite répond - fermer la socket
+  @fclose($socket);
+
+  // Mettre en cache le résultat
+  $lastCheck = $now;
+  $lastResult = true;
+
+  return true;
+}
+
+// Vérifier Vite au chargement du plugin
+if (!vite_check_server_and_cleanup()) {
+  return; // Vite est down, plugin supprimé, arrêter ici
+}
 
 // Assets détectés dynamiquement depuis functions.php
 // Catégorisés par contexte: front, admin (pages WP), editor (iframe Gutenberg)
@@ -239,14 +321,20 @@ add_action('shutdown', function() {
 function vite_inject_front_assets() {
   global \$vite_front_sources;
 
+  // Vérifier à nouveau que Vite est actif avant d'injecter
+  // (au cas où il aurait crashé depuis le chargement du plugin)
+  if (!vite_check_server_and_cleanup()) {
+    // Vite est down, le plugin s'est supprimé, ne rien injecter
+    return;
+  }
+
   // 1. Client Vite pour HMR
   echo '<script type="module" src="' . VITE_URL . '/@vite/client"></script>' . "\\n";
 
   // 2. HMR Body Reset Helper (injecté depuis le bundler - conditionnel)
-  ${HMR_BODY_RESET ? `\$bundlerPath = dirname(get_template_directory()) . '/../../vite-wp-bundler-main';
-  \$hmrHelperPath = \$bundlerPath . '/scripts/hmr-body-reset.js';
+  ${HMR_BODY_RESET ? `\$hmrHelperPath = '${PATHS.bundlerRoot.replace(/\\/g, '/')}/scripts/hmr-body-reset.js';
   if (file_exists(\$hmrHelperPath)) {
-    \$hmrHelperUrl = VITE_URL . '/@fs/' . str_replace('\\\\', '/', \$hmrHelperPath);
+    \$hmrHelperUrl = VITE_URL . '/@fs/' . \$hmrHelperPath;
     echo '<script type="module" src="' . esc_url(\$hmrHelperUrl) . '"></script>' . "\\n";
   }` : '// HMR Body Reset désactivé (HMR_BODY_RESET=false dans .env)'}
 
@@ -264,8 +352,8 @@ function vite_inject_front_assets() {
       // Script JS module
       echo '<script type="module" src="' . esc_url(\$viteUrl) . '"></script>' . "\\n";
     } elseif (preg_match('/\\\\.(scss|css)$/', \$sourcePath)) {
-      // Stylesheet SCSS/CSS via import dynamique pour que Vite compile et active le HMR
-      echo '<script type="module">import "' . esc_url(\$viteUrl) . '";</script>' . "\\n";
+      // Stylesheet SCSS/CSS via <link> pour que les URLs relatives fonctionnent
+      echo '<link rel="stylesheet" href="' . esc_url(\$viteUrl) . '">' . "\\n";
     }
   }
 }
@@ -308,42 +396,48 @@ async function openBrowser() {
 }
 
 /**
- * Plugin Vite pour générer le MU-plugin
+ * Plugin Vite pour gérer le MU-plugin (génération en dev, suppression en build)
  */
 export function generateMuPluginPlugin() {
   return {
     name: 'generate-mu-plugin',
 
     async buildStart() {
-      // Uniquement en mode dev (serve)
-      if (!this.meta?.watchMode) return;
+      const isDev = this.meta?.watchMode;
 
-      console.log('Génération du MU-plugin WordPress...');
+      // MODE DEV: Générer le MU-plugin
+      if (isDev) {
+        console.log('Génération du MU-plugin WordPress...');
 
-      // Recharger les variables d'environnement
-      const { HMR_BODY_RESET } = reloadEnvVars();
+        // Recharger les variables d'environnement
+        const { HMR_BODY_RESET } = reloadEnvVars();
 
-      // Nettoyer l'ancien MU-plugin s'il existe
-      if (existsSync(muPluginFile)) {
-        unlinkSync(muPluginFile);
+        // Nettoyer l'ancien MU-plugin s'il existe
+        if (existsSync(muPluginFile)) {
+          unlinkSync(muPluginFile);
+        }
+
+        // Générer le nouveau contenu
+        const muPluginContent = await generateMuPluginContent();
+
+        // Créer le dossier mu-plugins si nécessaire
+        if (!existsSync(muPluginsPath)) {
+          mkdirSync(muPluginsPath, { recursive: true });
+        }
+
+        // Écrire le MU-plugin
+        writeFileSync(muPluginFile, muPluginContent, 'utf8');
+
+        console.log(`   MU-plugin généré: wp-content/mu-plugins/vite-dev-mode.php`);
+        console.log(`   HMR_BODY_RESET = ${HMR_BODY_RESET}\n`);
+
+        // Ouvrir le navigateur (une seule fois)
+        await openBrowser();
       }
-
-      // Générer le nouveau contenu
-      const muPluginContent = await generateMuPluginContent();
-
-      // Créer le dossier mu-plugins si nécessaire
-      if (!existsSync(muPluginsPath)) {
-        mkdirSync(muPluginsPath, { recursive: true });
+      // MODE BUILD: Supprimer le MU-plugin s'il existe
+      else {
+        deleteMuPlugin();
       }
-
-      // Écrire le MU-plugin
-      writeFileSync(muPluginFile, muPluginContent, 'utf8');
-
-      console.log(`   MU-plugin généré: wp-content/mu-plugins/vite-dev-mode.php`);
-      console.log(`   HMR_BODY_RESET = ${HMR_BODY_RESET}\n`);
-
-      // Ouvrir le navigateur (une seule fois)
-      await openBrowser();
     }
   };
 }

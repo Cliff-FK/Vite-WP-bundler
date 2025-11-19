@@ -3,9 +3,10 @@
  * et incrémenter la version du thème dans style.css
  */
 
-import { existsSync, unlinkSync, rmdirSync, readdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { resolve } from 'path';
 import { PATHS, AUTO_INCREMENT_VERSION } from '../paths.config.js';
+import { deleteMuPlugin } from './generate-mu-plugin.js';
 
 // Flag global pour éviter d'enregistrer les listeners plusieurs fois
 let signalsRegistered = false;
@@ -13,9 +14,6 @@ let signalsRegistered = false;
 let versionIncremented = false;
 
 export function cleanupMuPluginOnClose() {
-  const muPluginsPath = resolve(PATHS.wpRoot, 'wp-content/mu-plugins');
-  const muPluginFile = resolve(muPluginsPath, 'vite-dev-mode.php');
-
   /**
    * Incrémente la version du thème dans style.css
    */
@@ -49,7 +47,7 @@ export function cleanupMuPluginOnClose() {
   };
 
   /**
-   * Nettoie le MU-plugin
+   * Nettoie le MU-plugin (utilise la fonction partagée)
    */
   const cleanupMuPlugin = () => {
     try {
@@ -58,15 +56,8 @@ export function cleanupMuPluginOnClose() {
         incrementThemeVersion();
       }
 
-      if (existsSync(muPluginFile)) {
-        unlinkSync(muPluginFile);
-      }
-      if (existsSync(muPluginsPath)) {
-        const files = readdirSync(muPluginsPath);
-        if (files.length === 0) {
-          rmdirSync(muPluginsPath);
-        }
-      }
+      // Supprimer le MU-plugin (fonction partagée avec build)
+      deleteMuPlugin();
     } catch (err) {
       // Silencieux
     }

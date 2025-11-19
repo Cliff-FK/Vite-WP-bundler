@@ -16,9 +16,15 @@ export function postcssUrlRewrite(mode = 'development', buildConfig = {}) {
 
     // Hook qui traite chaque déclaration CSS
     Declaration(decl, { result }) {
-      // En mode dev, ne rien faire - laisser les chemins sources inchangés
-      // Les symlinks permettent à Apache de servir directement depuis sources/
+      // En mode dev, transformer les chemins relatifs ../../ en chemins absolus /
+      // pour que Vite les serve via publicDir
       if (isDev) {
+        // Transformer url("../../images/...") → url("/images/...")
+        // Vite servira /images/ depuis publicDir (sources/)
+        decl.value = decl.value.replace(
+          /url\((['"]?)\.\.\/\.\.\/([^'")\s]+)(['"]?)\)/g,
+          'url($1/$2$3)'
+        );
         return;
       }
 

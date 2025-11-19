@@ -1,11 +1,502 @@
 import { PATHS, PHP_FILES_TO_SCAN } from '../paths.config.js';
-import { existsSync, copyFileSync, mkdirSync, readFileSync, openSync, readSync, closeSync } from 'fs';
-import { resolve, dirname } from 'path';
-import chalk from 'chalk';
+import { existsSync, readdirSync, readFileSync, openSync, readSync, closeSync } from 'fs';
+import { resolve, join, sep, extname } from 'path';
 import { getCachedAssets, saveCachedAssets, deleteOldBuildFolder } from './cache-manager.plugin.js';
 
 // Cache en mémoire des assets détectés pour éviter le double scan dans la même session
 let cachedAssets = null;
+
+/**
+ * ============================
+ * UTILITAIRES DE BASE
+ * ============================
+ */
+
+/**
+ * Normalise les séparateurs de chemin (Windows → Unix)
+ */
+function normalizePath(path) {
+  return path.replace(/\\/g, '/');
+}
+
+/**
+ * Extrait le nom de base d'un fichier sans .min et sans extension
+ * Ex: js/components/slider.min.js → slider
+ */
+function getBaseName(filePath) {
+  const fileName = filePath.split('/').pop();
+  return fileName
+    .replace(/\.min\.(js|css)$/, '.$1')
+    .replace(/\.(js|css|scss)$/, '');
+}
+
+/**
+ * Cherche récursivement des fichiers dans un dossier
+ * @param {string} dir - Dossier de départ
+ * @param {string[]} extensions - Extensions à chercher (ex: ['.js', '.scss'])
+ * @param {string[]} ignoreDirs - Dossiers à ignorer
+ * @returns {string[]} - Chemins relatifs depuis PATHS.themePath
+ */
+function findFilesRecursive(dir, extensions = [], ignoreDirs = ['node_modules', 'vendor', '.git', '.vite']) {
+  const results = [];
+
+  try {
+    if (!existsSync(dir)) return results;
+
+    const items = readdirSync(dir, { withFileTypes: true });
+
+    for (const item of items) {
+      if (ignoreDirs.includes(item.name)) continue;
+
+      const fullPath = join(dir, item.name);
+
+      if (item.isDirectory()) {
+        results.push(...findFilesRecursive(fullPath, extensions, ignoreDirs));
+      } else if (item.isFile()) {
+        const ext = extname(item.name);
+        if (extensions.length === 0 || extensions.includes(ext)) {
+          // Convertir en chemin relatif depuis themePath
+          const relativePath = normalizePath(fullPath.replace(PATHS.themePath + sep, ''));
+          results.push(relativePath);
+        }
+      }
+    }
+  } catch (err) {
+    // Ignorer les erreurs de lecture
+  }
+
+  return results;
+}
+
+/**
+ * ============================
+ * PARSING PHP
+ * ============================
+ */
+
+/**
+ * Parse les constantes PHP (define())
+ * @returns {Object} - Map des constantes (ex: { JS_PATH: 'assets/js', OPTI_PATH_URI: 'dist' })
+ */
+function parsePhpConstants(phpContent) {
+  const constants = {};
+
+  // Pattern: define('CONSTANT_NAME', get_template_directory_uri() . '/path/to/folder')
+  const defineRegex = /define\s*\(\s*['"]([\w_]+)['"]\s*,\s*get_template_directory(?:_uri)?\(\)\s*\.\s*['"]([^'"]+)['"]\s*\)/g;
+
+  let match;
+  while ((match = defineRegex.exec(phpContent)) !== null) {
+    const constantName = match[1];
+    const relativePath = match[2];
+    constants[constantName] = relativePath.replace(/^\/|\/$/g, ''); // Nettoyer les /
+  }
+
+  return constants;
+}
+
+/**
+ * Parse les variables PHP ($var = 'value')
+ * @param {string} phpContent - Contenu PHP
+ * @param {string[]} variablesToFind - Noms des variables à chercher (ex: ['theme_version', 'css_path'])
+ * @returns {Object} - Map des variables trouvées
+ */
+function parsePhpVariables(phpContent, variablesToFind) {
+  const variables = {};
+
+  if (!variablesToFind || variablesToFind.length === 0) {
+    return variables;
+  }
+
+  for (const varName of variablesToFind) {
+    // Pattern: $varName = 'value' ou $varName = "value"
+    const varRegex = new RegExp(`\\$${varName}\\s*=\\s*['"]([^'"]+)['"]`, 'g');
+    const match = varRegex.exec(phpContent);
+
+    if (match) {
+      variables[varName] = match[1];
+    }
+  }
+
+  return variables;
+}
+
+/**
+ * Extrait les noms de variables utilisées dans une URL d'enqueue
+ * Ex: $theme_version . '/css/style.css' → ['theme_version']
+ * Ex: CSS_PATH . $suffix . '.css' → ['suffix']
+ */
+function extractVariablesFromUrl(urlPattern) {
+  const variables = [];
+
+  // Matcher $varName (avec le $)
+  const varRegex = /\$(\w+)/g;
+  let match;
+
+  while ((match = varRegex.exec(urlPattern)) !== null) {
+    variables.push(match[1]);
+  }
+
+  return [...new Set(variables)]; // Dédupliquer
+}
+
+/**
+ * Résout une URL PHP avec constantes et variables
+ * Ex: OPTI_PATH_URI . '/css/' . $suffix . '.css'
+ * → 'dist/css/dark.css' (si OPTI_PATH_URI=dist, suffix=dark)
+ */
+function resolvePhpUrl(urlPattern, constants, variables) {
+  let resolvedUrl = urlPattern;
+
+  // 1. Remplacer les constantes (CONSTANT_NAME)
+  for (const [constantName, constantValue] of Object.entries(constants)) {
+    const regex = new RegExp(`\\b${constantName}\\b`, 'g');
+    resolvedUrl = resolvedUrl.replace(regex, `'${constantValue}'`); // Entourer de quotes
+  }
+
+  // 2. Remplacer les variables ($varName)
+  for (const [varName, varValue] of Object.entries(variables)) {
+    const regex = new RegExp(`\\$${varName}\\b`, 'g');
+    resolvedUrl = resolvedUrl.replace(regex, `'${varValue}'`); // Entourer de quotes
+  }
+
+  // 3. Nettoyer la concaténation PHP (. operator)
+  // Ex: 'dist/' . 'css/' . 'style.min.css' → 'dist/css/style.min.css'
+  resolvedUrl = resolvedUrl
+    .replace(/['"]\s*\.\s*['"]/g, '') // Retirer . entre quotes ('xxx' . 'yyy' → 'xxxyyy')
+    .replace(/^['"]|['"]$/g, ''); // Retirer quotes au début/fin
+
+  return resolvedUrl;
+}
+
+/**
+ * ============================
+ * SIGNATURE MATCHING
+ * ============================
+ */
+
+/**
+ * Extrait une signature d'un fichier compilé (éléments immuables)
+ * Signature = strings, nombres, sélecteurs CSS, APIs natives
+ * (Ne PAS utiliser les noms de variables car ils changent en minification)
+ */
+function extractSignature(code, isJs = true) {
+  const signature = {
+    strings: [],
+    numbers: [],
+    selectors: [], // CSS uniquement
+    apis: [] // JS uniquement
+  };
+
+  if (isJs) {
+    // Strings: 'xxx' ou "xxx" (limite à 100 premiers)
+    const stringRegex = /['"]([^'"]{3,50})['"]/g;
+    let match;
+    let count = 0;
+    while ((match = stringRegex.exec(code)) !== null && count < 100) {
+      signature.strings.push(match[1]);
+      count++;
+    }
+
+    // Nombres (entiers et décimaux, limite à 50)
+    const numberRegex = /\b(\d+\.?\d*)\b/g;
+    count = 0;
+    while ((match = numberRegex.exec(code)) !== null && count < 50) {
+      signature.numbers.push(match[1]);
+      count++;
+    }
+
+    // APIs natives JS (fetch, document., window., console., etc.)
+    const apiPatterns = [
+      /\b(fetch|querySelector|getElementById|addEventListener|setTimeout|setInterval|Math\.\w+|JSON\.\w+|localStorage\.\w+|sessionStorage\.\w+)\(/g
+    ];
+
+    for (const pattern of apiPatterns) {
+      while ((match = pattern.exec(code)) !== null) {
+        signature.apis.push(match[1]);
+      }
+    }
+  } else {
+    // CSS: extraire sélecteurs et valeurs
+
+    // Sélecteurs (classe, ID, tag) - limite à 100
+    const selectorRegex = /([.#]?[\w-]+)\s*\{/g;
+    let match;
+    let count = 0;
+    while ((match = selectorRegex.exec(code)) !== null && count < 100) {
+      signature.selectors.push(match[1]);
+      count++;
+    }
+
+    // Strings dans les CSS (fonts, urls, etc.)
+    const stringRegex = /['"]([^'"]{3,50})['"]/g;
+    count = 0;
+    while ((match = stringRegex.exec(code)) !== null && count < 50) {
+      signature.strings.push(match[1]);
+      count++;
+    }
+
+    // Nombres (dimensions, couleurs, etc.)
+    const numberRegex = /:\s*([0-9.]+(?:px|em|rem|%|vh|vw)?)\b/g;
+    count = 0;
+    while ((match = numberRegex.exec(code)) !== null && count < 50) {
+      signature.numbers.push(match[1]);
+      count++;
+    }
+  }
+
+  return signature;
+}
+
+/**
+ * Calcule la similarité entre deux signatures (0-1)
+ */
+function calculateSimilarity(sig1, sig2) {
+  const compareArrays = (arr1, arr2) => {
+    if (arr1.length === 0 && arr2.length === 0) return 0;
+    const set1 = new Set(arr1);
+    const set2 = new Set(arr2);
+    const intersection = new Set([...set1].filter(x => set2.has(x)));
+    const union = new Set([...set1, ...set2]);
+    return union.size > 0 ? intersection.size / union.size : 0;
+  };
+
+  const stringSim = compareArrays(sig1.strings, sig2.strings);
+  const numberSim = compareArrays(sig1.numbers, sig2.numbers);
+  const selectorSim = compareArrays(sig1.selectors, sig2.selectors);
+  const apiSim = compareArrays(sig1.apis, sig2.apis);
+
+  // Moyenne pondérée (strings et selectors/apis ont plus de poids)
+  const weights = {
+    strings: 0.4,
+    numbers: 0.2,
+    selectors: 0.3, // CSS
+    apis: 0.3 // JS
+  };
+
+  const totalWeight = weights.strings + weights.numbers +
+    (sig1.selectors.length > 0 ? weights.selectors : weights.apis);
+
+  const weightedSum =
+    stringSim * weights.strings +
+    numberSim * weights.numbers +
+    (sig1.selectors.length > 0 ? selectorSim * weights.selectors : apiSim * weights.apis);
+
+  return weightedSum / totalWeight;
+}
+
+/**
+ * Trouve le meilleur candidat par signature matching
+ * @param {string} minifiedPath - Chemin du fichier minifié (relatif)
+ * @param {string[]} candidates - Liste des candidats possibles (chemins relatifs)
+ * @returns {string|null} - Meilleur candidat ou null
+ */
+function findBySignature(minifiedPath, candidates) {
+  try {
+    const minifiedFullPath = resolve(PATHS.themePath, minifiedPath);
+    if (!existsSync(minifiedFullPath)) return null;
+
+    const minifiedCode = readFileSync(minifiedFullPath, 'utf-8');
+    const isJs = minifiedPath.endsWith('.js');
+    const minifiedSig = extractSignature(minifiedCode, isJs);
+
+    let bestMatch = null;
+    let bestScore = 0;
+
+    for (const candidate of candidates) {
+      const candidateFullPath = resolve(PATHS.themePath, candidate);
+      if (!existsSync(candidateFullPath)) continue;
+
+      const candidateCode = readFileSync(candidateFullPath, 'utf-8');
+      const candidateSig = extractSignature(candidateCode, isJs);
+
+      const score = calculateSimilarity(minifiedSig, candidateSig);
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = candidate;
+      }
+    }
+
+    // Seuil de confiance: au moins 30% de similarité
+    return bestScore >= 0.3 ? bestMatch : null;
+
+  } catch (err) {
+    console.warn(`Erreur signature matching pour ${minifiedPath}:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * ============================
+ * RECHERCHE DE FICHIERS SOURCES
+ * ============================
+ */
+
+/**
+ * Retire le préfixe de dossier de build d'un chemin
+ * Ex: dist/css/components/slider.min.css → css/components/slider.min.css
+ * Ex: optimised/js/main.min.js → js/main.min.js
+ */
+function removeBuildPrefix(path) {
+  const buildPatterns = ['dist', 'build', 'optimised', 'optimized', 'compiled', 'bundle', 'public', 'assets', 'output'];
+
+  for (const pattern of buildPatterns) {
+    if (path.startsWith(pattern + '/')) {
+      return path.substring(pattern.length + 1);
+    }
+  }
+
+  return path;
+}
+
+/**
+ * PRIORITÉ 1: Recherche par arborescence préservée
+ * Ex: dist/css/components/slider.min.css → sources/scss/components/slider.scss
+ *
+ * @param {string} minifiedPath - Chemin du fichier minifié (peut inclure build prefix)
+ * @returns {string[]|null} - Liste des candidats trouvés ou null
+ */
+function searchWithPreservedPath(minifiedPath) {
+  // 1. Retirer le préfixe de build
+  const pathWithoutBuild = removeBuildPrefix(minifiedPath);
+
+  // 2. Extraire l'arborescence et le nom de fichier
+  // Ex: css/components/slider.min.css → { dir: 'components', base: 'slider' }
+  const pathParts = pathWithoutBuild.split('/');
+  const fileName = pathParts.pop();
+
+  // IMPORTANT: Retirer le premier segment si c'est 'js' ou 'css'
+  // Car en build: dist/css/style.min.css mais en source: sources/scss/style.scss
+  const firstSegment = pathParts[0];
+  if (firstSegment === 'js' || firstSegment === 'css') {
+    pathParts.shift(); // Retirer le premier élément
+  }
+
+  const dirStructure = pathParts.join('/'); // Peut être vide si fichier à la racine
+
+  const baseName = getBaseName(fileName);
+  const isJs = fileName.endsWith('.js') || fileName.endsWith('.min.js');
+
+  // 3. Extensions à chercher
+  const extensions = isJs ? ['.js'] : ['.scss', '.css'];
+
+  // 4. Dossiers sources où chercher
+  const sourceFolders = [
+    PATHS.assetFolders.js,
+    PATHS.assetFolders.scss,
+    PATHS.assetFolders.css,
+    PATHS.assetFolders.publicDir // Ex: sources/, assets/, etc.
+  ].filter(Boolean);
+
+  const candidates = [];
+
+  // 5. Chercher dans chaque dossier source avec la structure préservée
+  for (const sourceFolder of sourceFolders) {
+    for (const ext of extensions) {
+      // Construire le chemin avec arborescence préservée
+      // Ex: sources/scss/components/slider.scss (si dirStructure = 'components')
+      // Ex: sources/scss/style.scss (si dirStructure vide)
+      const candidatePath = dirStructure
+        ? `${sourceFolder}/${dirStructure}/${baseName}${ext}`
+        : `${sourceFolder}/${baseName}${ext}`;
+      const absolutePath = resolve(PATHS.themePath, candidatePath);
+
+      if (existsSync(absolutePath)) {
+        candidates.push(candidatePath);
+      }
+    }
+  }
+
+  return candidates.length > 0 ? candidates : null;
+}
+
+/**
+ * FALLBACK: Recherche par nom de fichier uniquement (ignore l'arborescence)
+ * @param {string} minifiedPath - Chemin du fichier minifié
+ * @returns {string[]|null} - Liste des candidats trouvés ou null
+ */
+function searchByFilename(minifiedPath) {
+  const pathWithoutBuild = removeBuildPrefix(minifiedPath);
+  const baseName = getBaseName(pathWithoutBuild);
+  const isJs = pathWithoutBuild.endsWith('.js') || pathWithoutBuild.endsWith('.min.js');
+
+  const extensions = isJs ? ['.js'] : ['.scss', '.css'];
+
+  // Dossiers où chercher
+  const foldersToSearch = [
+    PATHS.assetFolders.js,
+    PATHS.assetFolders.css,
+    PATHS.assetFolders.scss,
+  ].filter(Boolean);
+
+  const candidates = [];
+
+  // Chercher récursivement dans chaque dossier
+  for (const folder of foldersToSearch) {
+    const folderPath = resolve(PATHS.themePath, folder);
+    const files = findFilesRecursive(folderPath, extensions);
+
+    // Garder seulement les fichiers qui correspondent au nom de base
+    for (const file of files) {
+      const fileBaseName = getBaseName(file);
+      if (fileBaseName === baseName) {
+        candidates.push(file);
+      }
+    }
+  }
+
+  return candidates.length > 0 ? candidates : null;
+}
+
+/**
+ * Fonction principale: trouve le fichier source depuis un chemin minifié
+ * Stratégie hybride:
+ *   1. Chercher avec arborescence préservée
+ *   2. Si plusieurs candidats → signature matching
+ *   3. Sinon fallback: chercher par nom uniquement
+ */
+function findSourceFile(minifiedPath) {
+  // PRIORITÉ 1: Arborescence préservée
+  let candidates = searchWithPreservedPath(minifiedPath);
+
+  if (candidates && candidates.length === 1) {
+    return candidates[0]; // Trouvé directement
+  }
+
+  if (candidates && candidates.length > 1) {
+    // Plusieurs candidats → signature matching
+    const bestMatch = findBySignature(minifiedPath, candidates);
+    if (bestMatch) return bestMatch;
+
+    // Fallback: prendre le premier candidat
+    return candidates[0];
+  }
+
+  // FALLBACK: Chercher par nom uniquement
+  candidates = searchByFilename(minifiedPath);
+
+  if (candidates && candidates.length === 1) {
+    return candidates[0];
+  }
+
+  if (candidates && candidates.length > 1) {
+    // Signature matching
+    const bestMatch = findBySignature(minifiedPath, candidates);
+    if (bestMatch) return bestMatch;
+
+    // Fallback: prendre le premier
+    return candidates[0];
+  }
+
+  // Aucun candidat trouvé
+  return null;
+}
+
+/**
+ * ============================
+ * DÉTECTION DES ASSETS WORDPRESS
+ * ============================
+ */
 
 /**
  * Détecte les assets depuis les fichiers PHP configurés (scan pur)
@@ -21,12 +512,6 @@ export async function detectAssetsFromWordPress() {
 
   // 2. Cache persistent (fichier .cache/)
   const { assets: persistentCache, oldBuildFolder } = getCachedAssets();
-
-  // Si un ancien buildFolder existe et est différent du nouveau, le supprimer
-  if (oldBuildFolder && !persistentCache) {
-    // Le cache est invalide, on va régénérer
-    // On garde l'ancien buildFolder pour le comparer après détection
-  }
 
   if (persistentCache) {
     cachedAssets = persistentCache;
@@ -61,37 +546,46 @@ export async function detectAssetsFromWordPress() {
       };
     }
 
-
     const functionsContent = allPhpContent;
 
-    // 1. PARSER LES CONSTANTES PHP (define()) pour construire une map de chemins
-    const phpConstants = {};
-    const defineRegex = /define\s*\(\s*['"]([\w_]+)['"]\s*,\s*get_template_directory(?:_uri)?\(\)\s*\.\s*['"]([^'"]+)['"]\s*\)/g;
-    let defineMatch;
-    while ((defineMatch = defineRegex.exec(functionsContent)) !== null) {
-      const constantName = defineMatch[1]; // Ex: JS_PATH, OPTI_PATH_URI
-      const relativePath = defineMatch[2]; // Ex: /assets/js/, /optimised/
-      phpConstants[constantName] = relativePath.replace(/^\/|\/$/g, ''); // Nettoyer les / au début/fin
+    // 1. PARSER LES CONSTANTES PHP (define())
+    const phpConstants = parsePhpConstants(functionsContent);
+
+    // 2. Détecter toutes les variables utilisées dans les enqueues
+    const allEnqueueUrls = [];
+
+    // Extraire toutes les URLs des enqueues (scripts + styles)
+    const allEnqueueRegex = /wp_(?:register|enqueue)_(?:script|style)\s*\([^,]+,\s*([^)]+)\)/g;
+    let match;
+    while ((match = allEnqueueRegex.exec(functionsContent)) !== null) {
+      allEnqueueUrls.push(match[1]);
     }
 
-    // console.log('Constantes PHP détectées:', phpConstants);
+    // Extraire toutes les variables utilisées dans ces URLs
+    const allVariables = new Set();
+    for (const url of allEnqueueUrls) {
+      const vars = extractVariablesFromUrl(url);
+      vars.forEach(v => allVariables.add(v));
+    }
 
-    // Détecter buildFolder depuis les constantes PHP OU utiliser la détection auto
-    let buildFolder = PATHS.assetFolders.dist; // Utiliser la détection dynamique en priorité
+    // 3. PARSER LES VARIABLES PHP (uniquement celles utilisées)
+    const phpVariables = parsePhpVariables(functionsContent, Array.from(allVariables));
+
+    // 4. Détecter buildFolder
+    let buildFolder = PATHS.assetFolders.dist;
     const buildFolderMatch = functionsContent.match(/define\s*\(\s*['"]OPTI_PATH(?:_URI)?\s*['"]\s*,\s*[^'"]*['"]([^'"]+)\//);
     if (buildFolderMatch) {
-      buildFolder = buildFolderMatch[1]; // Override si trouvé dans le PHP
+      buildFolder = buildFolderMatch[1];
     }
 
     const assets = {
       front: { scripts: [], styles: [] },
-      admin: { scripts: [], styles: [] },      // Pages admin WP (dashboard, settings, etc.)
-      editor: { scripts: [], styles: [] },     // Iframe Gutenberg uniquement
+      admin: { scripts: [], styles: [] },
+      editor: { scripts: [], styles: [] },
       buildFolder
     };
 
-    // Regex améliorée pour capturer le hook ET le contenu complet de la fonction
-    // Cherche: add_action('hook', function() { ... wp_register_script(...) ... })
+    // 5. PARSER LES SCRIPTS
     const scriptBlockRegex = /add_action\s*\(\s*['"]([^'"]+)['"]\s*,\s*function\s*\([^)]*\)\s*\{([^}]*?wp_(?:register|enqueue)_script[^}]*)\}/gs;
 
     let blockMatch;
@@ -99,47 +593,39 @@ export async function detectAssetsFromWordPress() {
       const hook = blockMatch[1];
       const functionBody = blockMatch[2];
 
-      // Vérifier si la fonction contient une condition !is_admin() ou $_GET['context'] === 'iframe'
-      const hasAdminCheck = /!\s*is_admin\s*\(\s*\)/.test(functionBody);
-      const hasIframeCheck = /\$_GET\s*\[\s*['"]context['"]\s*\]\s*===\s*['"]iframe['"]/.test(functionBody);
+      // Extraire les scripts enqueued
+      // Capture seulement le 2ème argument (URL) jusqu'à la virgule suivante
+      const scriptRegex = /wp_(?:register|enqueue)_script\s*\([^,]+,\s*([^,]+?)(?=\s*,|\s*\))/g;
+      let scriptMatch;
 
-      // Extraire tous les scripts enqueued dans ce bloc
-      // Capture: wp_enqueue_script('name', CONSTANT_NAME . 'path/file.js') ou directement 'path/file.js'
-      const scriptRegex = /wp_(?:register|enqueue)_script\s*\([^,]+,\s*(?:([\w_]+)\s*\.\s*)?['"]([^'"]+\.js)['"]/g;
-      let match;
-      while ((match = scriptRegex.exec(functionBody)) !== null) {
-        const constantUsed = match[1]; // Ex: OPTI_PATH_URI, JS_PATH, etc.
-        let scriptPath = match[2]; // Le chemin capturé
+      while ((scriptMatch = scriptRegex.exec(functionBody)) !== null) {
+        const urlPattern = scriptMatch[1].trim();
 
-        // console.log('Script détecté:', { constantUsed, scriptPath, hook });
-
-        // Si une constante PHP est utilisée, préfixer avec le chemin correspondant
-        if (constantUsed && phpConstants[constantUsed]) {
-          scriptPath = phpConstants[constantUsed] + '/' + scriptPath;
-          // console.log('  → Chemin reconstruit:', scriptPath);
-        }
+        // Résoudre l'URL complète avec constantes et variables
+        let scriptPath = resolvePhpUrl(urlPattern, phpConstants, phpVariables);
 
         // Ignorer les URLs externes
         if (scriptPath.startsWith('http')) continue;
 
-        // Convertir build → source
-        scriptPath = convertBuildToSourcePath(scriptPath);
+        // Convertir build → source avec la nouvelle logique
+        const sourcePath = findSourceFile(scriptPath);
+        if (!sourcePath) {
+          console.warn(`   ⚠ Source introuvable pour: ${scriptPath}`);
+          continue;
+        }
 
-        // Déterminer le contexte selon le hook ET les conditions détectées
+        scriptPath = sourcePath;
+
+        // Catégoriser selon le hook
         if (hook.includes('wp_enqueue_scripts')) {
-          // Frontend public uniquement
           if (!assets.front.scripts.includes(scriptPath)) {
             assets.front.scripts.push(scriptPath);
           }
         } else if (hook.includes('enqueue_block_editor_assets')) {
-          // Iframe Gutenberg uniquement (éditeur)
           if (!assets.editor.scripts.includes(scriptPath)) {
             assets.editor.scripts.push(scriptPath);
           }
         } else if (hook.includes('enqueue_block_assets')) {
-          // Hybride : Frontend (rendu blocs) + Iframe Gutenberg (éditeur)
-          // NOTE: WordPress charge aussi ces assets dans l'admin, mais Vite ne doit PAS les remplacer
-          // Le MU-plugin se charge de ne PAS injecter Vite dans l'admin (seulement front + editor iframe)
           if (!assets.front.scripts.includes(scriptPath)) {
             assets.front.scripts.push(scriptPath);
           }
@@ -147,13 +633,10 @@ export async function detectAssetsFromWordPress() {
             assets.editor.scripts.push(scriptPath);
           }
         } else if (hook.includes('admin') || hook.includes('login') || hook.includes('customize_register')) {
-          // Pages admin WP (dashboard, settings, login, customizer)
           if (!assets.admin.scripts.includes(scriptPath)) {
             assets.admin.scripts.push(scriptPath);
           }
         } else {
-          // Hooks ambigus (init, after_setup_theme, etc.)
-          // Par sécurité : considérer comme admin WP
           if (!assets.admin.scripts.includes(scriptPath)) {
             assets.admin.scripts.push(scriptPath);
           }
@@ -161,48 +644,41 @@ export async function detectAssetsFromWordPress() {
       }
     }
 
-    // Idem pour les styles - détecter les blocs add_action avec conditions
+    // 6. PARSER LES STYLES
     const styleBlockRegex = /add_action\s*\(\s*['"]([^'"]+)['"]\s*,\s*function\s*\([^)]*\)\s*\{([^}]*?wp_(?:register|enqueue)_style[^}]*)\}/gs;
 
     while ((blockMatch = styleBlockRegex.exec(functionsContent)) !== null) {
       const hook = blockMatch[1];
       const functionBody = blockMatch[2];
 
-      // Vérifier si la fonction contient une condition !is_admin() ou $_GET['context'] === 'iframe'
-      const hasAdminCheck = /!\s*is_admin\s*\(\s*\)/.test(functionBody);
-      const hasIframeCheck = /\$_GET\s*\[\s*['"]context['"]\s*\]\s*===\s*['"]iframe['"]/.test(functionBody);
+      // Capture seulement le 2ème argument (URL) jusqu'à la virgule suivante
+      const styleRegex = /wp_(?:register|enqueue)_style\s*\([^,]+,\s*([^,]+?)(?=\s*,|\s*\))/g;
+      let styleMatch;
 
-      // Extraire tous les styles enqueued dans ce bloc
-      const styleRegex = /wp_(?:register|enqueue)_style\s*\([^,]+,\s*(?:([\w_]+)\s*\.\s*)?['"]([^'"]+\.(?:css|scss))['"]/g;
-      let match;
-      while ((match = styleRegex.exec(functionBody)) !== null) {
-        const constantUsed = match[1];
-        let stylePath = match[2];
+      while ((styleMatch = styleRegex.exec(functionBody)) !== null) {
+        const urlPattern = styleMatch[1].trim();
 
-        // Si une constante PHP est utilisée, préfixer avec le chemin correspondant
-        if (constantUsed && phpConstants[constantUsed]) {
-          stylePath = phpConstants[constantUsed] + '/' + stylePath;
-        }
+        let stylePath = resolvePhpUrl(urlPattern, phpConstants, phpVariables);
 
         if (stylePath.startsWith('http')) continue;
 
-        stylePath = convertBuildToSourcePath(stylePath);
+        const sourcePath = findSourceFile(stylePath);
+        if (!sourcePath) {
+          console.warn(`   ⚠ Source introuvable pour: ${stylePath}`);
+          continue;
+        }
 
-        // Déterminer le contexte selon le hook ET les conditions détectées
+        stylePath = sourcePath;
+
         if (hook.includes('wp_enqueue_scripts')) {
-          // Frontend public uniquement
           if (!assets.front.styles.includes(stylePath)) {
             assets.front.styles.push(stylePath);
           }
         } else if (hook.includes('enqueue_block_editor_assets')) {
-          // Iframe Gutenberg uniquement (éditeur)
           if (!assets.editor.styles.includes(stylePath)) {
             assets.editor.styles.push(stylePath);
           }
         } else if (hook.includes('enqueue_block_assets')) {
-          // Hybride : Frontend (rendu blocs) + Iframe Gutenberg (éditeur)
-          // NOTE: WordPress charge aussi ces assets dans l'admin, mais Vite ne doit PAS les remplacer
-          // Le MU-plugin se charge de ne PAS injecter Vite dans l'admin (seulement front + editor iframe)
           if (!assets.front.styles.includes(stylePath)) {
             assets.front.styles.push(stylePath);
           }
@@ -210,13 +686,10 @@ export async function detectAssetsFromWordPress() {
             assets.editor.styles.push(stylePath);
           }
         } else if (hook.includes('admin') || hook.includes('login') || hook.includes('customize_register')) {
-          // Pages admin WP (dashboard, settings, login, customizer)
           if (!assets.admin.styles.includes(stylePath)) {
             assets.admin.styles.push(stylePath);
           }
         } else {
-          // Hooks ambigus (init, etc.)
-          // Par sécurité : considérer comme admin WP
           if (!assets.admin.styles.includes(stylePath)) {
             assets.admin.styles.push(stylePath);
           }
@@ -224,26 +697,31 @@ export async function detectAssetsFromWordPress() {
       }
     }
 
-    // Gérer add_editor_style() séparément (sans hook)
-    const editorStyleRegex = /add_editor_style\s*\(\s*(?:([\w_]+)\s*\.\s*)?['"]([^'"]+\.(?:css|scss))['"]/g;
+    // 7. PARSER add_editor_style()
+    const editorStyleRegex = /add_editor_style\s*\(\s*([^)]+)\)/g;
     let editorMatch;
-    while ((editorMatch = editorStyleRegex.exec(functionsContent)) !== null) {
-      const constantUsed = editorMatch[1];
-      let stylePath = editorMatch[2];
 
-      // Si une constante PHP est utilisée, préfixer avec le chemin correspondant
-      if (constantUsed && phpConstants[constantUsed]) {
-        stylePath = phpConstants[constantUsed] + '/' + stylePath;
-      }
+    while ((editorMatch = editorStyleRegex.exec(functionsContent)) !== null) {
+      const urlPattern = editorMatch[1].trim();
+
+      let stylePath = resolvePhpUrl(urlPattern, phpConstants, phpVariables);
 
       if (stylePath.startsWith('http')) continue;
-      stylePath = convertBuildToSourcePath(stylePath);
+
+      const sourcePath = findSourceFile(stylePath);
+      if (!sourcePath) {
+        console.warn(`   ⚠ Source introuvable pour: ${stylePath}`);
+        continue;
+      }
+
+      stylePath = sourcePath;
+
       if (!assets.editor.styles.includes(stylePath)) {
         assets.editor.styles.push(stylePath);
       }
     }
 
-    // Séparer sources vs libs pour chaque contexte
+    // Séparer sources vs libs
     const result = categorizeAssets(assets);
 
     // Si buildFolder a changé, supprimer l'ancien
@@ -251,7 +729,7 @@ export async function detectAssetsFromWordPress() {
       deleteOldBuildFolder(oldBuildFolder);
     }
 
-    // Mettre en cache (mémoire + persistent)
+    // Mettre en cache
     cachedAssets = result;
     saveCachedAssets(result);
 
@@ -266,141 +744,53 @@ export async function detectAssetsFromWordPress() {
       buildFolder: 'dist'
     };
 
-    // Mettre en cache même en cas d'erreur
     cachedAssets = errorResult;
-
     return errorResult;
   }
 }
 
 /**
- * Convertit un chemin de build vers un chemin source
- * Ex: optimised/js/main.min.js → js/main.js (si main.js existe)
- * Ex: optimised/js/unpoly.min.js → js/unpoly.min.js (si unpoly.js n'existe pas)
- * Ex: optimised/css/style.min.css → scss/style.scss (si style.scss existe)
- */
-function convertBuildToSourcePath(path) {
-  const buildPatterns = ['dist', 'build', 'optimised', 'optimized', 'compiled', 'bundle', 'public', 'assets', 'output'];
-
-  // Retirer le dossier de build s'il est présent
-  let pathWithoutBuild = path;
-  for (const pattern of buildPatterns) {
-    if (path.startsWith(pattern + '/')) {
-      pathWithoutBuild = path.substring(pattern.length + 1);
-      break;
-    }
-  }
-
-  // Helper function: cherche un fichier par son nom dans le thème (ignore les chemins)
-  function findSourceByFilename(originalPath) {
-    // Extraire le nom de fichier (ex: js/main.min.js → main)
-    const filename = originalPath
-      .split('/').pop()           // Garder seulement le nom de fichier
-      .replace(/\.min\.(js|css)$/, '.$1')  // Retirer .min
-      .replace(/\.(js|css)$/, '');         // Retirer extension
-
-    // console.log(`  → Recherche de fichiers nommés: ${filename}.{js,css,scss}`);
-
-    // Extensions possibles à chercher (source > build)
-    const extensionsToSearch = [];
-    if (originalPath.endsWith('.js') || originalPath.endsWith('.min.js')) {
-      extensionsToSearch.push('.js');
-    }
-    if (originalPath.endsWith('.css') || originalPath.endsWith('.min.css')) {
-      extensionsToSearch.push('.scss', '.css');
-    }
-
-    // Dossiers où chercher - utiliser les dossiers détectés dynamiquement
-    const foldersToSearch = [
-      PATHS.assetFolders.js,
-      PATHS.assetFolders.css,
-      PATHS.assetFolders.scss,
-    ].filter(Boolean); // Retirer les valeurs undefined/null
-
-    // Chercher dans tous les dossiers avec toutes les extensions
-    for (const folder of foldersToSearch) {
-      for (const ext of extensionsToSearch) {
-        const searchPath = `${folder}/${filename}${ext}`;
-        const absolutePath = resolve(PATHS.themePath, searchPath);
-
-        if (existsSync(absolutePath)) {
-          // console.log(`  ✓ Trouvé: ${searchPath}`);
-          return searchPath;
-        }
-      }
-    }
-
-    // console.log(`  ✗ Aucune source trouvée pour: ${filename}`);
-    return null;
-  }
-
-  // Chercher le fichier source par son nom (ignore les chemins)
-  const foundSource = findSourceByFilename(pathWithoutBuild);
-  if (foundSource) {
-    return foundSource;
-  }
-
-  // Aucune source trouvée → garder le chemin tel quel (sera copié si existe, ou erreur)
-  // console.log(`  → Garde le chemin d'origine: ${pathWithoutBuild}`);
-  return pathWithoutBuild;
-}
-
-/**
  * Détecte si un fichier est une librairie (analyse du contenu)
- * Performance: ~0.5-1ms par fichier (lecture partielle uniquement)
- * @param {string} filePath - Chemin relatif (ex: "js/main.js")
- * @returns {boolean}
  */
 function isLibrary(filePath) {
   try {
     const absolutePath = resolve(PATHS.themePath, filePath);
     if (!existsSync(absolutePath)) return false;
 
-    // ÉTAPE 1: Lecture partielle (premiers 2000 caractères = ultra rapide)
     const fd = openSync(absolutePath, 'r');
     const buffer = Buffer.alloc(2000);
     const bytesRead = readSync(fd, buffer, 0, 2000, 0);
     closeSync(fd);
     const content = buffer.toString('utf-8', 0, bytesRead);
 
-    // ÉTAPE 2: Vérifier headers de libs (99% des cas détectés ici)
-    // Header avec @license, @preserve, ou version (ex: /*! jQuery v3.6.0 */)
     if (/^\/\*[!*]?\s*(?:@preserve|@license|@version|@name|\w+\s+v\d+\.\d+)/i.test(content)) {
       return true;
     }
 
-    // ÉTAPE 3: Détecter code minifié (ligne unique longue)
     const firstLine = content.split('\n')[0];
     if (firstLine.length > 500) {
       return true;
     }
 
-    // ÉTAPE 4: Détection par pattern de code minifié
     const hasMinifiedPattern =
-      /[a-z]\.[a-z]{1,3}\(/.test(content) && // Appels courts (t.e(), a.push())
-      !/\n\s{2,}/.test(content.substring(0, 500)); // Pas d'indentation
+      /[a-z]\.[a-z]{1,3}\(/.test(content) &&
+      !/\n\s{2,}/.test(content.substring(0, 500));
 
     if (hasMinifiedPattern) {
       return true;
     }
 
-    // ÉTAPE 5: Fallback basé sur le nom
-    // Si contient .min → probablement une lib
-    // Sauf si c'est un nom de source connue (main.min.js, style.min.css)
     const basename = filePath.split('/').pop().replace(/\.min\.(js|css)$/, '');
     const KNOWN_SOURCES = ['main', 'style', 'admin', 'editor'];
 
     if (filePath.includes('.min.')) {
-      // C'est un .min → lib SAUF si c'est un nom connu
       return !KNOWN_SOURCES.includes(basename);
     }
 
-    // Pas de .min → source par défaut
     return false;
 
   } catch (err) {
     console.warn(`Erreur détection lib ${filePath}:`, err.message);
-    // Fallback: si .min dans le nom et pas dans KNOWN_SOURCES
     return filePath.includes('.min.') && !['main', 'style', 'admin'].some(s => filePath.includes(s));
   }
 }
@@ -416,9 +806,7 @@ function categorizeAssets(assets) {
     buildFolder: assets.buildFolder
   };
 
-  // Traiter chaque contexte
   for (const context of ['front', 'admin', 'editor']) {
-    // Scripts
     for (const script of assets[context].scripts) {
       if (isLibrary(script)) {
         result[context].libs.push(script);
@@ -427,7 +815,6 @@ function categorizeAssets(assets) {
       }
     }
 
-    // Styles
     for (const style of assets[context].styles) {
       if (isLibrary(style)) {
         result[context].libs.push(style);
@@ -437,59 +824,15 @@ function categorizeAssets(assets) {
     }
   }
 
-  // Logs de debug avec déduplication pour affichage uniquement
-  // (les assets réels ne sont PAS modifiés, juste les compteurs d'affichage)
-  const allAssets = new Set([
-    ...result.editor.sources,
-    ...result.editor.libs,
-    ...result.front.sources,
-    ...result.front.libs,
-    ...result.admin.sources,
-    ...result.admin.libs
-  ]);
-
-  // Compter les assets uniques par contexte en priorisant: editor > admin > front
-  const displayCounts = {
-    frontSources: 0,
-    frontLibs: 0,
-    adminSources: 0,
-    adminLibs: 0,
-    editorSources: 0,
-    editorLibs: 0
-  };
-
-  allAssets.forEach(asset => {
-    const isEditorSource = result.editor.sources.includes(asset);
-    const isEditorLib = result.editor.libs.includes(asset);
-    const isAdminSource = result.admin.sources.includes(asset);
-    const isAdminLib = result.admin.libs.includes(asset);
-    const isFrontSource = result.front.sources.includes(asset);
-    const isFrontLib = result.front.libs.includes(asset);
-
-    // Priorité: editor > admin > front (un asset n'est compté qu'une seule fois)
-    if (isEditorSource || isEditorLib) {
-      if (isEditorSource) displayCounts.editorSources++;
-      if (isEditorLib) displayCounts.editorLibs++;
-    } else if (isAdminSource || isAdminLib) {
-      if (isAdminSource) displayCounts.adminSources++;
-      if (isAdminLib) displayCounts.adminLibs++;
-    } else if (isFrontSource || isFrontLib) {
-      if (isFrontSource) displayCounts.frontSources++;
-      if (isFrontLib) displayCounts.frontLibs++;
-    }
-  });
-
   return result;
 }
 
 /**
  * Détecte si le dossier de build utilise une structure plate ou avec sous-dossiers
- * @returns {Object} { isFlat, hasJsSubfolder, hasCssSubfolder }
  */
 export function detectBuildStructure() {
   const buildPath = resolve(PATHS.themePath, PATHS.assetFolders.dist);
 
-  // Si le dossier de build n'existe pas encore, supposer structure avec sous-dossiers
   if (!existsSync(buildPath)) {
     return {
       isFlat: false,
@@ -498,8 +841,6 @@ export function detectBuildStructure() {
     };
   }
 
-  // Chercher les sous-dossiers js/ et css/ dans le dossier de build
-  // (PAS les chemins sources - juste 'js' et 'css' comme noms de dossiers)
   const hasJsSubfolder = existsSync(resolve(buildPath, 'js'));
   const hasCssSubfolder = existsSync(resolve(buildPath, 'css'));
 
@@ -512,53 +853,38 @@ export function detectBuildStructure() {
 
 /**
  * Génère les entry points Rollup depuis les assets détectés
- * Combine tous les contextes (front + admin + both)
- * Valide l'existence des fichiers pour éviter les erreurs Rollup
  */
 export function generateRollupInputs(assets) {
   const inputs = {};
   const missingFiles = [];
 
-  // Fusionner tous les contexts
   const allSources = [
     ...assets.front.sources,
     ...assets.admin.sources,
     ...assets.editor.sources
   ];
 
-  // Dédupliquer
   const uniqueSources = [...new Set(allSources)];
 
   uniqueSources.forEach(path => {
     const absolutePath = resolve(PATHS.themePath, path);
 
-    // Vérifier si le fichier existe avant de l'ajouter
     if (!existsSync(absolutePath)) {
       missingFiles.push(path);
-      return; // Ignorer ce fichier
+      return;
     }
 
-    // Générer le nom de l'entrée en préservant la structure pour le build
-    // Support des multi-level subdirectories : garder les 2 derniers segments
-    // Utiliser un séparateur unique (§) pour éviter la confusion avec les tirets dans les noms de fichiers
-    // Ex: assets/scripts/frontend/main.js → frontend§main
-    // Ex: js-src/app-main.js → js-src§app-main (préserve les tirets originaux)
-    // Ex: scss/style.scss → css§style (pour générer css/style.min.css)
     const pathWithoutExt = path.replace(/\.(js|ts|scss|css)$/, '');
     const pathParts = pathWithoutExt.split('/');
 
     let name;
     if (pathParts.length > 2) {
-      // Multi-level : garder les 2 derniers segments (dossier parent + fichier)
       name = pathParts.slice(-2).join('§');
     } else {
-      // Niveau simple : comportement standard
       name = pathParts.join('§');
     }
 
-    // Si c'est un fichier SCSS, remplacer le préfixe du dossier source par le dossier de sortie CSS
     if (path.match(/\.scss$/)) {
-      // Extraire le premier segment du path (ex: scss, styles, etc.)
       const sourceFolder = pathParts[0];
       name = name.replace(new RegExp(`^${sourceFolder}§`), `${PATHS.assetFolders.css}§`);
     }
@@ -566,7 +892,6 @@ export function generateRollupInputs(assets) {
     inputs[name] = absolutePath;
   });
 
-  // Afficher les warnings pour les fichiers manquants
   if (missingFiles.length > 0) {
     console.warn(`\n${missingFiles.length} fichier(s) enqueue(s) introuvable(s):`);
     missingFiles.forEach(file => {

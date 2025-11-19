@@ -49,8 +49,11 @@ export default defineConfig(async ({ command }) => {
   // Base URL pour les assets
   base: '/',
 
-  // Désactiver publicDir (on gère les assets via middleware)
-  publicDir: false,
+  // En mode dev : servir les assets statiques depuis le dossier détecté dynamiquement (ex: sources/, assets/, etc.)
+  // En mode build : désactiver (les assets seront copiés par le plugin)
+  publicDir: command === 'serve' && PATHS.assetFolders.publicDir
+    ? resolve(PATHS.themePath, PATHS.assetFolders.publicDir)
+    : false,
 
   // Configuration du serveur de développement
   server: {
@@ -77,6 +80,7 @@ export default defineConfig(async ({ command }) => {
       port: PATHS.vitePort,
       overlay: true,
     },
+
   },
 
   // Plugins Vite
@@ -85,13 +89,14 @@ export default defineConfig(async ({ command }) => {
     sassGlobImports(),
 
     // Plugin pour copier les assets statiques
-    // Dev : copie tout à la racine du thème (./images, ./inc) pour Apache
+    // Dev : NE RIEN FAIRE - Vite sert les assets via publicDir
     // Build : scanne et copie seulement ce qui est utilisé dans dist/
     copyStaticAssetsPlugin(command),
 
-    // Plugin pour générer le MU-plugin WordPress à chaque démarrage du serveur (mode dev uniquement)
-    // Permet de prendre en compte les changements de .env (HMR_BODY_RESET, etc.) en live
-    ...(command === 'serve' ? [generateMuPluginPlugin()] : []),
+    // Plugin pour gérer le MU-plugin WordPress
+    // Dev : Génère le MU-plugin pour injecter Vite HMR
+    // Build : Supprime le MU-plugin pour utiliser les assets de build
+    generateMuPluginPlugin(),
 
     // Plugin pour accepter automatiquement le HMR sur tous les modules JS du thème (mode dev uniquement)
     // Empêche Vite de faire un full-reload et laisse hmr-body-reset.js gérer le HMR

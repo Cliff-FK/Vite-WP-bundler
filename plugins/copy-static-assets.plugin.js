@@ -133,34 +133,9 @@ export function copyStaticAssetsPlugin(mode = 'build') {
   return {
     name: 'copy-static-assets',
 
-    // En mode dev : créer des symlinks vers les sources (pas de copie)
+    // En mode dev : NE RIEN FAIRE
     configResolved() {
-      if (isDev) {
-        const themePath = PATHS.themePath;
-
-        // Symlink images: sources/images → ./images
-        if (PATHS.assetFolders.images && existsSync(resolve(themePath, PATHS.assetFolders.images))) {
-          const srcImages = resolve(themePath, PATHS.assetFolders.images);
-          const destImages = resolve(themePath, 'images');
-          createSymlink(srcImages, destImages);
-        }
-
-        // Symlink fonts: sources/fonts → ./fonts
-        if (PATHS.assetFolders.fonts && existsSync(resolve(themePath, PATHS.assetFolders.fonts))) {
-          const srcFonts = resolve(themePath, PATHS.assetFolders.fonts);
-          const destFonts = resolve(themePath, 'fonts');
-          createSymlink(srcFonts, destFonts);
-        }
-
-        // Symlink includes: includes → ./inc
-        if (PATHS.assetFolders.includes && PATHS.assetFolders.includesDest) {
-          const srcIncludes = resolve(themePath, PATHS.assetFolders.includes);
-          const destInc = resolve(themePath, PATHS.assetFolders.includesDest);
-          if (existsSync(srcIncludes)) {
-            createSymlink(srcIncludes, destInc);
-          }
-        }
-      }
+      // Vite servira les assets via publicDir
     },
 
     // En mode build : scanner et copier après compilation

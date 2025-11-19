@@ -66,7 +66,6 @@
     // Sauvegarder le HTML du body
     if (!originalBodyHTML && document.body) {
       originalBodyHTML = document.body.innerHTML;
-      console.log('[Vite HMR] Body HTML sauvegardé');
     }
 
     // Détecter uniquement les scripts JS externes (type="module" avec src="/@fs/" et .js)
@@ -77,11 +76,6 @@
         src: script.src,
         path: script.src.split('/@fs/').pop()
       }));
-
-    if (viteSourceScripts.length > 0) {
-      console.log('[Vite HMR] Scripts JS Vite détectés:', viteSourceScripts.length);
-      viteSourceScripts.forEach(s => console.log('  -', s.path));
-    }
   }
 
   /**
@@ -89,11 +83,8 @@
    */
   function resetBodyAndReinjectScripts() {
     if (!originalBodyHTML) {
-      console.warn('[Vite HMR] Pas de HTML sauvegardé, impossible de réinitialiser');
       return;
     }
-
-    console.log('[Vite HMR] Réinitialisation du body...');
 
     try {
       // 1. Sauvegarder la position du scroll
@@ -128,10 +119,7 @@
       newBody.innerHTML = ''; // Body vide temporairement
       oldBody.parentNode.replaceChild(newBody, oldBody);
 
-      console.log('[Vite HMR] ✓ Body réinitialisé (vide temporairement)');
-
       // 5. Réinjecter les scripts du thème avec timestamp et attendre leur chargement
-      console.log('[Vite HMR] Réinjection des scripts du thème...');
 
       const scriptPromises = [];
 
@@ -143,16 +131,8 @@
             script.type = 'module';
             script.src = scriptInfo.src + (scriptInfo.src.includes('?') ? '&' : '?') + 't=' + timestamp;
 
-            script.onload = () => {
-              console.log('[Vite HMR] ✓ Script chargé:', scriptInfo.path);
-              resolve();
-            };
-            script.onerror = () => {
-              console.warn('[Vite HMR] ⚠ Erreur script:', scriptInfo.path);
-              resolve(); // Résoudre quand même
-            };
-
-            console.log('[Vite HMR] Injection:', scriptInfo.path);
+            script.onload = () => resolve();
+            script.onerror = () => resolve();
             document.head.appendChild(script);
           });
 
@@ -162,28 +142,20 @@
 
       // 6. Une fois TOUS les scripts chargés, restaurer le body
       Promise.all(scriptPromises).then(() => {
-        console.log('[Vite HMR] ✓ Tous les scripts chargés, restauration du body...');
-
         // Restaurer le HTML du body
         document.body.innerHTML = originalBodyHTML;
 
-        console.log('[Vite HMR] ✓ Body restauré avec contenu');
-
         // 7. Déclencher manuellement un événement DOMContentLoaded custom pour que les modules se réinitialisent
-        // Attendre un micro-tick pour que le DOM soit bien à jour
         setTimeout(() => {
           const event = new Event('DOMContentLoaded', {
             bubbles: true,
             cancelable: false
           });
           document.dispatchEvent(event);
-          console.log('[Vite HMR] ✓ Événement DOMContentLoaded déclenché');
 
           // 8. Restaurer la position du scroll après un court délai pour que les modules s'initialisent
           setTimeout(() => {
             window.scrollTo(savedScrollPosition.x, savedScrollPosition.y);
-            console.log('[Vite HMR] ✓ Position du scroll restaurée:', savedScrollPosition);
-            console.log('[Vite HMR] ✓ HMR complet terminé');
           }, 50);
         }, 0);
       });
@@ -198,11 +170,8 @@
   function setupHMR() {
     // Vérifier que import.meta.hot est disponible
     if (!import.meta.hot) {
-      console.warn('[Vite HMR] import.meta.hot non disponible');
       return;
     }
-
-    console.log('[Vite HMR] Hook HMR activé');
 
     // Accepter les changements de ce module sans callback (ne rien faire sur ses propres changements)
     import.meta.hot.accept(() => {
@@ -215,8 +184,6 @@
     // Intercepter TOUS les updates HMR avant que Vite décide de reload
     // On utilise 'vite:beforeUpdate' pour détecter les changements
     import.meta.hot.on('vite:beforeUpdate', (payload) => {
-      console.log('[Vite HMR] Changement détecté:', payload);
-
       // Vérifier s'il y a des updates JS UNIQUEMENT pour les fichiers .js du thème
       // NE PAS réinitialiser pour les .scss, .css, ou hmr-body-reset.js
       const jsUpdates = payload.updates?.filter(update =>
@@ -228,8 +195,6 @@
       );
 
       if (jsUpdates && jsUpdates.length > 0) {
-        console.log('[Vite HMR] Mise à jour JS détectée:', jsUpdates.map(u => u.path).join(', '));
-
         // Empêcher le reload complet de Vite pour ces updates JS
         payload.updates = payload.updates.filter(update =>
           !(update.type === 'js-update' &&
@@ -255,6 +220,4 @@
     captureInitialState();
     setupHMR();
   }
-
-  console.log('[Vite HMR] Body Reset Helper chargé');
 })();

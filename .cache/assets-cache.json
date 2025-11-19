@@ -1,27 +1,27 @@
 {
-  "hash": "20a5e173e782fdbc908021036e378c58",
-  "timestamp": "2025-11-17T16:40:39.176Z",
+  "hash": "853ffde479b47d90d1ad773bc5bbfc49",
+  "timestamp": "2025-11-19T14:25:44.596Z",
   "assets": {
     "front": {
       "sources": [
-        "js/main.js",
-        "scss/style.scss"
+        "sources/js/main.js",
+        "sources/scss/style.scss"
       ],
       "libs": []
     },
     "admin": {
       "sources": [
-        "scss/admin.scss"
+        "sources/scss/admin.scss"
       ],
       "libs": []
     },
     "editor": {
       "sources": [
-        "js/main.js",
-        "scss/style.scss"
+        "sources/js/main.js",
+        "sources/scss/style.scss"
       ],
       "libs": []
     },
-    "buildFolder": "/optimised"
+    "buildFolder": "/dist"
   }
 }
