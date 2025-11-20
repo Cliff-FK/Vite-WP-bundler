@@ -23,8 +23,9 @@ const execAsync = promisify(exec);
 let browserOpened = false;
 
 // Chemins du MU-plugin
-const muPluginsPath = resolve(PATHS.wpRoot, 'wp-content/mu-plugins');
+const muPluginsPath = PATHS.muPluginsPath;
 const muPluginFile = resolve(muPluginsPath, 'vite-dev-mode.php');
+const muPluginGitignore = resolve(muPluginsPath, '.gitignore');
 
 /**
  * Supprime le MU-plugin Vite (pour mode build)
@@ -34,6 +35,11 @@ export function deleteMuPlugin() {
   if (existsSync(muPluginFile)) {
     try {
       unlinkSync(muPluginFile);
+
+      // Supprimer aussi le .gitignore associé
+      if (existsSync(muPluginGitignore)) {
+        unlinkSync(muPluginGitignore);
+      }
 
       // Vérifier si le dossier mu-plugins est vide
       if (existsSync(muPluginsPath)) {
@@ -428,7 +434,15 @@ export function generateMuPluginPlugin() {
         // Écrire le MU-plugin
         writeFileSync(muPluginFile, muPluginContent, 'utf8');
 
-        console.log(`   MU-plugin généré: wp-content/mu-plugins/vite-dev-mode.php`);
+        // Générer le .gitignore à côté du mu-plugin
+        const gitignoreContent = `# Fichiers générés automatiquement par vite-wp-bundler
+# Ne pas commiter - ils seront recréés automatiquement en mode dev
+vite-dev-mode.php
+`;
+        writeFileSync(muPluginGitignore, gitignoreContent, 'utf8');
+
+        console.log(`   MU-plugin généré: ${PATHS.muPluginsPathRelative}/vite-dev-mode.php`);
+        console.log(`   .gitignore généré: ${PATHS.muPluginsPathRelative}/.gitignore`);
         console.log(`   HMR_BODY_RESET = ${HMR_BODY_RESET}\n`);
 
         // Ouvrir le navigateur (une seule fois)

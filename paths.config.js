@@ -66,6 +66,7 @@ if (!process.env.THEME_NAME) {
 }
 
 const WP_THEMES_PATH = process.env.WP_THEMES_PATH || 'wp-content/themes';
+const WP_MU_PLUGIN_PATH = process.env.WP_MU_PLUGIN_PATH || 'wp-content/mu-plugins';
 const THEME_NAME = process.env.THEME_NAME;
 const THEME_PATH_FULL = `${WP_THEMES_PATH}/${THEME_NAME}`;
 
@@ -307,6 +308,10 @@ export const PATHS = {
   themeUrl: `${WP_URL}/${THEME_PATH_FULL}`,
   themeName: THEME_NAME,
   themePathRelative: THEME_PATH_FULL, // Chemin relatif depuis la racine WP
+
+  // MU-plugins
+  muPluginsPath: resolve(WP_ROOT, WP_MU_PLUGIN_PATH),
+  muPluginsPathRelative: WP_MU_PLUGIN_PATH, // Chemin relatif depuis la racine WP
 
   // Noms des dossiers d'assets (configurables)
   assetFolders: ASSET_FOLDERS,
