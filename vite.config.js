@@ -8,7 +8,7 @@ import {
   detectBuildStructure
 } from './plugins/wordpress-assets-detector.plugin.js';
 import { portKillerPlugin } from './plugins/port-killer.plugin.js';
-import { cleanupMuPluginOnClose } from './plugins/cleanup-mu-plugin.plugin.js';
+import { cleanupMuPluginOnClose } from './plugins/cleanup-mu-plugin.js';
 import { acceptAllHMRPlugin } from './plugins/accept-all-hmr.plugin.js';
 import { generateMuPluginPlugin } from './plugins/generate-mu-plugin.js';
 import { copyMinifiedLibsPlugin } from './plugins/copy-minified-libs.plugin.js';
