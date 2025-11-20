@@ -4,3 +4,4 @@
 
 # Racine
 node_modules/
+.cache/
