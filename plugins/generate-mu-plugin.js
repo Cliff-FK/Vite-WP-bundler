@@ -35,13 +35,22 @@ export function deleteMuPlugin() {
   if (existsSync(muPluginFile)) {
     try {
       unlinkSync(muPluginFile);
+    } catch (err) {
+      // Le fichier peut être verrouillé par PHP/WordPress
+      // On ignore l'erreur silencieusement
+    }
 
-      // Supprimer aussi le .gitignore associé
+    // Supprimer aussi le .gitignore associé
+    try {
       if (existsSync(muPluginGitignore)) {
         unlinkSync(muPluginGitignore);
       }
+    } catch (err) {
+      // Ignorer les erreurs
+    }
 
-      // Vérifier si le dossier mu-plugins est vide
+    // Vérifier si le dossier mu-plugins est vide
+    try {
       if (existsSync(muPluginsPath)) {
         const files = readdirSync(muPluginsPath);
 
@@ -51,7 +60,7 @@ export function deleteMuPlugin() {
         }
       }
     } catch (err) {
-      // Silencieux
+      // Ignorer les erreurs
     }
   }
 }
@@ -420,7 +429,13 @@ export function generateMuPluginPlugin() {
 
         // Nettoyer l'ancien MU-plugin s'il existe
         if (existsSync(muPluginFile)) {
-          unlinkSync(muPluginFile);
+          try {
+            unlinkSync(muPluginFile);
+          } catch (err) {
+            // Le fichier peut être verrouillé par PHP/WordPress sous Windows
+            // On continue quand même, writeFileSync va écraser le contenu
+            console.warn('   ⚠ Impossible de supprimer l\'ancien mu-plugin (peut-être utilisé par PHP)');
+          }
         }
 
         // Générer le nouveau contenu
