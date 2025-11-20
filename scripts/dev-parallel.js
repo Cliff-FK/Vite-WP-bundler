@@ -33,8 +33,12 @@ process.on('SIGTERM', () => {
 });
 
 viteProcess.on('exit', (code) => {
-  if (code !== 0) {
+  // Codes de sortie normaux lors d'un arrêt volontaire (Ctrl+C, etc.)
+  // Code 0 = succès, null = tué par signal, 130 = SIGINT (Ctrl+C)
+  if (code !== 0 && code !== null && code !== 130) {
     console.error(`❌ Vite s'est arrêté avec le code ${code}`);
     process.exit(code);
   }
+  // Sortie normale
+  process.exit(0);
 });

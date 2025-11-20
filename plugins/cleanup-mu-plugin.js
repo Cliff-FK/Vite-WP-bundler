@@ -74,19 +74,19 @@ export function cleanupMuPluginOnClose() {
         process.setMaxListeners(20);
 
         // Ctrl+C - Incrémenter la version uniquement (pas de suppression du MU-plugin)
-        process.on('SIGINT', () => {
+        process.once('SIGINT', () => {
           cleanupOnClose();
           process.exit(0);
         });
 
         // Kill - Incrémenter la version uniquement (pas de suppression du MU-plugin)
-        process.on('SIGTERM', () => {
+        process.once('SIGTERM', () => {
           cleanupOnClose();
           process.exit(0);
         });
 
         // Fermeture normale - Incrémenter la version uniquement
-        process.on('exit', () => {
+        process.once('exit', () => {
           cleanupOnClose();
         });
       }
