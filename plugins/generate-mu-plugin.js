@@ -82,6 +82,40 @@ function reloadEnvVars() {
 }
 
 /**
+ * Ajoute le dossier de build du thème au .gitignore racine WordPress si pas déjà présent
+ */
+function ensureBuildFolderInGitignore(buildFolder) {
+  const wpGitignorePath = resolve(PATHS.wpRoot, '.gitignore');
+
+  // Construire le chemin complet depuis la racine WP: wp-content/themes/themezero/dist/
+  const buildFolderPath = `${PATHS.themePathRelative}/${buildFolder.replace(/^\//, '')}`;
+  const gitignoreLine = `${buildFolderPath}/`;
+
+  try {
+    // Lire le contenu existant ou créer un fichier vide
+    let content = '';
+    if (existsSync(wpGitignorePath)) {
+      content = readFileSync(wpGitignorePath, 'utf8');
+    }
+
+    // Vérifier si le dossier de build est déjà ignoré
+    if (content.includes(buildFolderPath)) {
+      return; // Déjà présent
+    }
+
+    // Ajouter le dossier de build au .gitignore
+    const newContent = content
+      ? `${content}\n# Dossier de build généré par Vite\n${gitignoreLine}\n`
+      : `# Dossier de build généré par Vite\n${gitignoreLine}\n`;
+
+    writeFileSync(wpGitignorePath, newContent, 'utf8');
+    console.log(`   .gitignore racine mis à jour: ${gitignoreLine}`);
+  } catch (err) {
+    // Ignorer les erreurs silencieusement
+  }
+}
+
+/**
  * Génère le contenu du MU-plugin PHP
  */
 async function generateMuPluginContent() {
@@ -438,6 +472,10 @@ export function generateMuPluginPlugin() {
           }
         }
 
+        // Détecter les assets pour obtenir le buildFolder
+        const detectedAssets = await detectAssetsFromWordPress();
+        const buildFolder = detectedAssets.buildFolder;
+
         // Générer le nouveau contenu
         const muPluginContent = await generateMuPluginContent();
 
@@ -455,6 +493,9 @@ export function generateMuPluginPlugin() {
 vite-dev-mode.php
 `;
         writeFileSync(muPluginGitignore, gitignoreContent, 'utf8');
+
+        // Ajouter le dossier de build au .gitignore racine WordPress
+        ensureBuildFolderInGitignore(buildFolder);
 
         console.log(`   MU-plugin généré: ${PATHS.muPluginsPathRelative}/vite-dev-mode.php`);
         console.log(`   .gitignore généré: ${PATHS.muPluginsPathRelative}/.gitignore`);
