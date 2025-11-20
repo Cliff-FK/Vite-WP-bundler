@@ -47,19 +47,19 @@ export function cleanupMuPluginOnClose() {
   };
 
   /**
-   * Nettoie le MU-plugin (utilise la fonction partagée)
+   * Actions à la fermeture de Vite
    */
-  const cleanupMuPlugin = () => {
+  const cleanupOnClose = () => {
     try {
-      // Incrémenter la version avant de nettoyer (si activé)
+      // Incrémenter la version du thème (si activé)
       if (AUTO_INCREMENT_VERSION) {
         incrementThemeVersion();
       }
 
-      // Supprimer le MU-plugin (fonction partagée avec build)
+      // Supprimer le MU-plugin
       deleteMuPlugin();
     } catch (err) {
-      // Silencieux
+      // Silencieux - les erreurs sont déjà gérées dans deleteMuPlugin()
     }
   };
 
@@ -73,21 +73,21 @@ export function cleanupMuPluginOnClose() {
         // Augmenter la limite de listeners pour éviter les warnings
         process.setMaxListeners(20);
 
-        // Ctrl+C - Nettoyer uniquement le MU-plugin
+        // Ctrl+C - Incrémenter la version uniquement (pas de suppression du MU-plugin)
         process.on('SIGINT', () => {
-          cleanupMuPlugin();
+          cleanupOnClose();
           process.exit(0);
         });
 
-        // Kill - Nettoyer uniquement le MU-plugin
+        // Kill - Incrémenter la version uniquement (pas de suppression du MU-plugin)
         process.on('SIGTERM', () => {
-          cleanupMuPlugin();
+          cleanupOnClose();
           process.exit(0);
         });
 
-        // Fermeture normale - Nettoyer uniquement le MU-plugin
+        // Fermeture normale - Incrémenter la version uniquement
         process.on('exit', () => {
-          cleanupMuPlugin();
+          cleanupOnClose();
         });
       }
     }
