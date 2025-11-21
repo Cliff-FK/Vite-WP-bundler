@@ -4,4 +4,7 @@
 
 # Racine
 node_modules/
+.claude/
 .cache/
+.git/
+nul

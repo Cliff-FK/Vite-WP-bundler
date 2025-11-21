@@ -13,6 +13,7 @@ import { acceptAllHMRPlugin } from './plugins/accept-all-hmr.plugin.js';
 import { generateMuPluginPlugin } from './plugins/generate-mu-plugin.js';
 import { copyMinifiedLibsPlugin } from './plugins/copy-minified-libs.plugin.js';
 import { copyStaticAssetsPlugin } from './plugins/copy-static-assets.plugin.js';
+import { serveStaticAssetsPlugin } from './plugins/serve-static-assets.plugin.js';
 import sassGlobImports from 'vite-plugin-sass-glob-import';
 import { resolve } from 'path';
 
@@ -49,11 +50,9 @@ export default defineConfig(async ({ command }) => {
   // Base URL pour les assets
   base: '/',
 
-  // En mode dev : servir les assets statiques depuis le dossier détecté dynamiquement (ex: sources/, assets/, etc.)
+  // En mode dev : désactiver publicDir (on utilise un middleware personnalisé pour servir depuis plusieurs dossiers)
   // En mode build : désactiver (les assets seront copiés par le plugin)
-  publicDir: command === 'serve' && PATHS.assetFolders.publicDir
-    ? resolve(PATHS.themePath, PATHS.assetFolders.publicDir)
-    : false,
+  publicDir: false,
 
   // Configuration du serveur de développement
   server: {
@@ -89,9 +88,14 @@ export default defineConfig(async ({ command }) => {
     sassGlobImports(),
 
     // Plugin pour copier les assets statiques
-    // Dev : NE RIEN FAIRE - Vite sert les assets via publicDir
+    // Dev : NE RIEN FAIRE - Les assets sont servis via serveStaticAssetsPlugin
     // Build : scanne et copie seulement ce qui est utilisé dans dist/
     copyStaticAssetsPlugin(command),
+
+    // Plugin pour servir les assets statiques en mode dev
+    // Dev : Middleware qui sert fonts/, images/, inc/ etc. depuis le thème
+    // Build : désactivé (les assets sont copiés par copyStaticAssetsPlugin)
+    ...(command === 'serve' ? [serveStaticAssetsPlugin()] : []),
 
     // Plugin pour gérer le MU-plugin WordPress
     // Dev : Génère le MU-plugin pour injecter Vite HMR
@@ -182,7 +186,13 @@ export default defineConfig(async ({ command }) => {
 
         // Silencer les warnings de dépréciation Sass
         api: 'modern-compiler', // Utiliser la nouvelle API Sass
-        silenceDeprecations: ['import', 'legacy-js-api'], // Ignorer les warnings @import et legacy API
+        silenceDeprecations: [
+          'import',           // @import deprecated
+          'legacy-js-api',    // Legacy API deprecated
+          'global-builtin',   // Global built-in functions (lighten, darken, etc.)
+          'color-functions',  // Color functions deprecated
+          'slash-div',        // Division with / deprecated
+        ],
       },
     },
     devSourcemap: true, // Sourcemaps en dev
@@ -277,7 +287,8 @@ export default defineConfig(async ({ command }) => {
             // Structure avec sous-dossiers CSS - utiliser buildFolder dynamique
             return `css/${baseName}.min.css`;
           }
-          return '[name].min.[ext]';
+          // Pour les autres assets (fonts, images, etc.) : pas de .min, conserver le nom original
+          return '[name].[ext]';
         },
         // Réécrire les chemins des imports externes (.min.js)
         // Les fichiers sont copiés à plat dans le dossier de sortie

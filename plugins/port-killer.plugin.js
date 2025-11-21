@@ -74,15 +74,11 @@ async function killProcessOnPort(port) {
         const isNodeProcess = tasklistOutput.toLowerCase().includes('node.exe');
 
         if (isNodeProcess) {
-          console.log(`Port ${port} occupé par Node.js (PID ${pid}), libération...`);
           // Utiliser powershell pour un kill plus sûr avec gestion d'erreur silencieuse
           await execAsync(`powershell -Command "Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue"`);
-          console.log(`   Processus ${pid} arrêté`);
 
           // Attendre un peu pour que le port soit vraiment libéré
           await new Promise(resolve => setTimeout(resolve, 500));
-        } else {
-          console.warn(`Port ${port} occupé par un processus non-Node (PID ${pid}), ignoré`);
         }
       } catch (err) {
         // Processus déjà mort ou erreur de permission, ignorer silencieusement
