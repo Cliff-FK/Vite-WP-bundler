@@ -230,6 +230,11 @@ function detectStaticAssetFolders() {
       }
     }
 
+    // Si pas trouvé dans sources/assets/src, chercher 'images' à la racine du thème
+    if (!folders.images && themeFiles.some(f => f.isDirectory() && f.name === 'images')) {
+      folders.images = 'images';
+    }
+
     // Chercher un dossier contenant fonts
     for (const folder of imagesFolders) {
       const folderPath = resolve(themePath, folder.name);
@@ -238,6 +243,11 @@ function detectStaticAssetFolders() {
         folders.fonts = `${folder.name}/fonts`;
         break;
       }
+    }
+
+    // Si pas trouvé dans sources/assets/src, chercher 'fonts' à la racine du thème
+    if (!folders.fonts && themeFiles.some(f => f.isDirectory() && f.name === 'fonts')) {
+      folders.fonts = 'fonts';
     }
 
     // Chercher un dossier includes/inc
@@ -261,6 +271,7 @@ const detectedStaticFolders = detectStaticAssetFolders();
 /**
  * Détecte le dossier parent commun des assets statiques
  * Ex: si images = "sources/images" et fonts = "sources/fonts" → retourne "sources"
+ * Si les dossiers sont à la racine (ex: "fonts", "images") → retourne "." (racine du thème)
  */
 function detectPublicDir() {
   const folders = [
@@ -276,10 +287,18 @@ function detectPublicDir() {
   // Si tous les dossiers partagent le même parent, le retourner
   const commonParent = firstSegments[0];
   if (firstSegments.every(seg => seg === commonParent)) {
+    // Si le parent est le dossier lui-même (ex: "fonts" → firstSegment "fonts")
+    // cela signifie qu'il est à la racine du thème
+    // Vérifier si c'est un dossier racine (pas de slash dans le chemin)
+    const isRootFolder = folders.every(f => !f.includes('/'));
+    if (isRootFolder) {
+      return '.'; // Retourner la racine du thème comme publicDir
+    }
     return commonParent;
   }
 
-  return null; // Pas de dossier parent commun
+  // Pas de parent commun, mais des assets existent → servir depuis la racine du thème
+  return '.';
 }
 
 const ASSET_FOLDERS = {

@@ -109,7 +109,6 @@ function ensureBuildFolderInGitignore(buildFolder) {
       : `# Dossier de build généré par Vite\n${gitignoreLine}\n`;
 
     writeFileSync(wpGitignorePath, newContent, 'utf8');
-    console.log(`   .gitignore racine mis à jour: ${gitignoreLine}`);
   } catch (err) {
     // Ignorer les erreurs silencieusement
   }
@@ -284,61 +283,45 @@ function vite_dequeue_build_assets_front() {
 add_action('wp_enqueue_scripts', 'vite_dequeue_build_assets_front', 9999);
 
 /**
+ * Filtrer wp_preload_resources pour retirer tous les preload du dossier de build
+ * S'exécute en dernier (priorité 99999) pour filtrer après tous les ajouts du theme
+ */
+add_filter('wp_preload_resources', function(\$resources) {
+  global \$vite_build_folder;
+
+  return array_filter(\$resources, function(\$resource) use (\$vite_build_folder) {
+    // Garder uniquement les ressources qui ne contiennent PAS le dossier de build
+    return !isset(\$resource['href']) || strpos(\$resource['href'], \$vite_build_folder) === false;
+  });
+}, 99999);
+
+/**
  * Fonction de nettoyage des assets de build via output buffering (FRONT uniquement)
- * Fallback au cas où wp_dequeue_* ne capture pas certains assets
+ * Supprime uniquement les JS et CSS du dossier de build, pas les fonts
  */
 function vite_remove_build_assets_callback(\$html) {
-  global \$vite_build_folder, \$vite_front_sources;
+  global \$vite_build_folder;
 
-  foreach (\$vite_front_sources as \$sourcePath) {
-    // Convertir source → build path
-    \$buildPath = str_replace('.js', '.min.js', \$sourcePath);
-    \$buildPath = str_replace('.scss', '.min.css', \$buildPath);
-    \$buildPath = str_replace('scss/', 'css/', \$buildPath);
+  // Supprimer les <link rel="stylesheet"> et <link rel="preload" as="style"> qui contiennent le dossier de build
+  \$html = preg_replace(
+    '/<link[^>]*' . preg_quote(\$vite_build_folder, '/') . '[^>]*\\.css[^>]*>/i',
+    '<!-- Vite Dev Mode: CSS supprimé -->',
+    \$html
+  );
 
-    // Construire le chemin de recherche (relatif depuis le thème)
-    // Ex: optimised/css/admin.min.css
-    \$searchPath = \$vite_build_folder . '/' . \$buildPath;
+  // Supprimer les <link rel="preload" as="script"> qui contiennent le dossier de build
+  \$html = preg_replace(
+    '/<link[^>]*rel=["\']preload["\'][^>]*as=["\']script["\'][^>]*' . preg_quote(\$vite_build_folder, '/') . '[^>]*\\.js[^>]*>/i',
+    '<!-- Vite Dev Mode: preload JS supprimé -->',
+    \$html
+  );
 
-    // Aussi chercher juste le nom du fichier final (pour les URLs complètes)
-    // Ex: admin.min.css
-    \$fileName = basename(\$buildPath);
-
-    // CSS - Retirer les <link> qui contiennent le chemin de build
-    if (strpos(\$buildPath, '.css') !== false) {
-      // Trouver toutes les balises <link> qui contiennent notre chemin
-      \$html = preg_replace_callback(
-        '/<link[^>]*>/i',
-        function(\$matches) use (\$searchPath, \$fileName) {
-          // Si le tag contient notre chemin de build OU le nom du fichier, on le supprime
-          // Cela gère à la fois les chemins relatifs et les URLs complètes
-          if (strpos(\$matches[0], \$searchPath) !== false ||
-              (strpos(\$matches[0], \$fileName) !== false && strpos(\$matches[0], 'href') !== false)) {
-            return '';
-          }
-          return \$matches[0];
-        },
-        \$html
-      );
-    }
-
-    // JS - Retirer les <script> qui contiennent le chemin de build
-    if (strpos(\$buildPath, '.js') !== false) {
-      // Trouver toutes les balises <script> qui contiennent notre chemin
-      \$html = preg_replace_callback(
-        '/<script[^>]*><\\\\/script>/i',
-        function(\$matches) use (\$searchPath, \$fileName) {
-          // Si le tag contient notre chemin de build OU le nom du fichier, on le supprime
-          if (strpos(\$matches[0], \$searchPath) !== false ||
-              (strpos(\$matches[0], \$fileName) !== false && strpos(\$matches[0], 'src') !== false)) {
-            return '';
-          }
-          return \$matches[0];
-        },
-        \$html
-      );
-    }
-  }
+  // Supprimer toutes les balises <script> qui contiennent le dossier de build
+  \$html = preg_replace(
+    '/<script[^>]*' . preg_quote(\$vite_build_folder, '/') . '[^>]*\\.js[^>]*>.*?<\\/script>/is',
+    '<!-- Vite Dev Mode: script JS supprimé -->',
+    \$html
+  );
 
   return \$html;
 }
@@ -432,7 +415,6 @@ async function openBrowser() {
   browserOpened = true;
 
   const wpUrl = `${PATHS.wpProtocol}://${PATHS.wpHost}:${PATHS.wpPort}${PATHS.wpBasePath}`;
-  console.log(`\n  Ouvre: ${wpUrl}\n`);
 
   const os = platform();
   const openCommand = os === 'win32' ? `start "" "${wpUrl}"` : os === 'darwin' ? `open "${wpUrl}"` : `xdg-open "${wpUrl}"`;
@@ -456,8 +438,6 @@ export function generateMuPluginPlugin() {
 
       // MODE DEV: Générer le MU-plugin
       if (isDev) {
-        console.log('Génération du MU-plugin WordPress...');
-
         // Recharger les variables d'environnement
         const { HMR_BODY_RESET } = reloadEnvVars();
 
@@ -468,7 +448,6 @@ export function generateMuPluginPlugin() {
           } catch (err) {
             // Le fichier peut être verrouillé par PHP/WordPress sous Windows
             // On continue quand même, writeFileSync va écraser le contenu
-            console.warn('   ⚠ Impossible de supprimer l\'ancien mu-plugin (peut-être utilisé par PHP)');
           }
         }
 
@@ -496,10 +475,6 @@ vite-dev-mode.php
 
         // Ajouter le dossier de build au .gitignore racine WordPress
         ensureBuildFolderInGitignore(buildFolder);
-
-        console.log(`   MU-plugin généré: ${PATHS.muPluginsPathRelative}/vite-dev-mode.php`);
-        console.log(`   .gitignore généré: ${PATHS.muPluginsPathRelative}/.gitignore`);
-        console.log(`   HMR_BODY_RESET = ${HMR_BODY_RESET}\n`);
 
         // Ouvrir le navigateur (une seule fois)
         await openBrowser();

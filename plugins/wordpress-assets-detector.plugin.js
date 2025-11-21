@@ -88,7 +88,7 @@ function parsePhpConstants(phpContent) {
   while ((match = defineRegex.exec(phpContent)) !== null) {
     const constantName = match[1];
     const relativePath = match[2];
-    constants[constantName] = relativePath.replace(/^\/|\/$/g, ''); // Nettoyer les /
+    constants[constantName] = relativePath.replace(/^\//, ''); // Retirer seulement le / au début, garder celui de fin
   }
 
   return constants;
@@ -161,9 +161,12 @@ function resolvePhpUrl(urlPattern, constants, variables) {
 
   // 3. Nettoyer la concaténation PHP (. operator)
   // Ex: 'dist/' . 'css/' . 'style.min.css' → 'dist/css/style.min.css'
+  // Ex: 'dist'.'css/style.min.css' → 'dist/css/style.min.css' (sans espaces)
+  // Stratégie : split sur '.' (avec espaces optionnels) puis retirer les quotes
   resolvedUrl = resolvedUrl
-    .replace(/['"]\s*\.\s*['"]/g, '') // Retirer . entre quotes ('xxx' . 'yyy' → 'xxxyyy')
-    .replace(/^['"]|['"]$/g, ''); // Retirer quotes au début/fin
+    .split(/'\s*\.\s*'/)  // Split sur '.' ou ' . '
+    .map(segment => segment.replace(/^['"]|['"]$/g, '')) // Retirer quotes début/fin de chaque segment
+    .join(''); // Recoller
 
   return resolvedUrl;
 }
@@ -422,11 +425,11 @@ function searchByFilename(minifiedPath) {
 
   const extensions = isJs ? ['.js'] : ['.scss', '.css'];
 
-  // Dossiers où chercher
+  // Dossiers où chercher (par ordre de priorité)
   const foldersToSearch = [
+    PATHS.assetFolders.scss,  // SCSS en premier (priorité)
     PATHS.assetFolders.js,
     PATHS.assetFolders.css,
-    PATHS.assetFolders.scss,
   ].filter(Boolean);
 
   const candidates = [];
@@ -437,9 +440,10 @@ function searchByFilename(minifiedPath) {
     const files = findFilesRecursive(folderPath, extensions);
 
     // Garder seulement les fichiers qui correspondent au nom de base
+    // ET qui sont bien dans le dossier source (pas dans fonts/, vendors/, etc.)
     for (const file of files) {
       const fileBaseName = getBaseName(file);
-      if (fileBaseName === baseName) {
+      if (fileBaseName === baseName && file.startsWith(folder + '/')) {
         candidates.push(file);
       }
     }
@@ -464,11 +468,32 @@ function findSourceFile(minifiedPath) {
   }
 
   if (candidates && candidates.length > 1) {
-    // Plusieurs candidats → signature matching
-    const bestMatch = findBySignature(minifiedPath, candidates);
-    if (bestMatch) return bestMatch;
+    // Plusieurs candidats → trier par priorité (SCSS > JS > CSS)
+    // Priorité : SCSS > JS > CSS, puis fichiers à la racine des dossiers sources
+    const priorityFolders = [
+      PATHS.assetFolders.scss,
+      PATHS.assetFolders.js,
+      PATHS.assetFolders.css,
+    ].filter(Boolean);
 
-    // Fallback: prendre le premier candidat
+    candidates.sort((a, b) => {
+      // Trouver l'index de priorité pour chaque candidat
+      const aPriority = priorityFolders.findIndex(folder => a.startsWith(folder + '/'));
+      const bPriority = priorityFolders.findIndex(folder => b.startsWith(folder + '/'));
+
+      // Si les deux sont dans des dossiers sources, comparer les priorités
+      if (aPriority !== -1 && bPriority !== -1) {
+        return aPriority - bPriority; // Plus petit index = plus haute priorité
+      }
+
+      // Sinon, mettre les fichiers sources en premier
+      if (aPriority !== -1) return -1; // a est dans un dossier source
+      if (bPriority !== -1) return 1;  // b est dans un dossier source
+
+      return 0; // Aucune différence
+    });
+
+    // Prendre le premier (plus haute priorité)
     return candidates[0];
   }
 
@@ -585,17 +610,40 @@ export async function detectAssetsFromWordPress() {
       buildFolder
     };
 
-    // 5. PARSER LES SCRIPTS
-    const scriptBlockRegex = /add_action\s*\(\s*['"]([^'"]+)['"]\s*,\s*function\s*\([^)]*\)\s*\{([^}]*?wp_(?:register|enqueue)_script[^}]*)\}/gs;
+    // 5. PARSER LES SCRIPTS (y compris wp_enqueue_script_module)
+
+    // 5a. Parser les add_action avec fonctions anonymes
+    const scriptBlockRegex = /add_action\s*\(\s*['"]([^'"]+)['"]\s*,\s*function\s*\([^)]*\)\s*\{([^}]*?wp_(?:register|enqueue)_script(?:_module)?[^}]*)\}/gs;
+
+    // 5b. Parser les add_action avec fonctions nommées
+    const namedFunctionRegex = /add_action\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"](\w+)['"]\s*\)/g;
+    const namedFunctions = new Map();
+
+    // D'abord, détecter toutes les fonctions nommées liées aux hooks
+    let namedMatch;
+    while ((namedMatch = namedFunctionRegex.exec(functionsContent)) !== null) {
+      const hook = namedMatch[1];
+      const functionName = namedMatch[2];
+
+      // Chercher la définition de cette fonction
+      const funcDefRegex = new RegExp(`function\\s+${functionName}\\s*\\([^)]*\\)\\s*\\{([^]*?)\\n\\s*\\}`, 's');
+      const funcDefMatch = funcDefRegex.exec(functionsContent);
+
+      if (funcDefMatch && funcDefMatch[1].includes('wp_')) {
+        namedFunctions.set(hook, funcDefMatch[1]);
+      }
+    }
 
     let blockMatch;
+
+    // Parser les fonctions anonymes
     while ((blockMatch = scriptBlockRegex.exec(functionsContent)) !== null) {
       const hook = blockMatch[1];
       const functionBody = blockMatch[2];
 
-      // Extraire les scripts enqueued
+      // Extraire les scripts enqueued (y compris script_module)
       // Capture seulement le 2ème argument (URL) jusqu'à la virgule suivante
-      const scriptRegex = /wp_(?:register|enqueue)_script\s*\([^,]+,\s*([^,]+?)(?=\s*,|\s*\))/g;
+      const scriptRegex = /wp_(?:register|enqueue)_script(?:_module)?\s*\([^,]+,\s*([^,]+?)(?=\s*,|\s*\))/g;
       let scriptMatch;
 
       while ((scriptMatch = scriptRegex.exec(functionBody)) !== null) {
@@ -604,8 +652,8 @@ export async function detectAssetsFromWordPress() {
         // Résoudre l'URL complète avec constantes et variables
         let scriptPath = resolvePhpUrl(urlPattern, phpConstants, phpVariables);
 
-        // Ignorer les URLs externes
-        if (scriptPath.startsWith('http')) continue;
+        // Ignorer les URLs externes, les false/null, et les variables JS
+        if (scriptPath.startsWith('http') || scriptPath === 'false' || scriptPath === 'null' || !scriptPath.includes('.')) continue;
 
         // Convertir build → source avec la nouvelle logique
         const sourcePath = findSourceFile(scriptPath);
@@ -644,7 +692,58 @@ export async function detectAssetsFromWordPress() {
       }
     }
 
+    // Parser les fonctions nommées détectées
+    for (const [hook, functionBody] of namedFunctions) {
+      const scriptRegex = /wp_(?:register|enqueue)_script(?:_module)?\s*\([^,]+,\s*([^,]+?)(?=\s*,|\s*\))/g;
+      let scriptMatch;
+
+      while ((scriptMatch = scriptRegex.exec(functionBody)) !== null) {
+        const urlPattern = scriptMatch[1].trim();
+
+        let scriptPath = resolvePhpUrl(urlPattern, phpConstants, phpVariables);
+
+        // Ignorer les URLs externes, les false/null, et les variables JS
+        if (scriptPath.startsWith('http') || scriptPath === 'false' || scriptPath === 'null' || !scriptPath.includes('.')) continue;
+
+        const sourcePath = findSourceFile(scriptPath);
+        if (!sourcePath) {
+          console.warn(`   ⚠ Source introuvable pour: ${scriptPath}`);
+          continue;
+        }
+
+        scriptPath = sourcePath;
+
+        // Catégoriser selon le hook
+        if (hook.includes('wp_enqueue_scripts')) {
+          if (!assets.front.scripts.includes(scriptPath)) {
+            assets.front.scripts.push(scriptPath);
+          }
+        } else if (hook.includes('enqueue_block_editor_assets')) {
+          if (!assets.editor.scripts.includes(scriptPath)) {
+            assets.editor.scripts.push(scriptPath);
+          }
+        } else if (hook.includes('enqueue_block_assets')) {
+          if (!assets.front.scripts.includes(scriptPath)) {
+            assets.front.scripts.push(scriptPath);
+          }
+          if (!assets.editor.scripts.includes(scriptPath)) {
+            assets.editor.scripts.push(scriptPath);
+          }
+        } else if (hook.includes('admin') || hook.includes('login') || hook.includes('customize_register')) {
+          if (!assets.admin.scripts.includes(scriptPath)) {
+            assets.admin.scripts.push(scriptPath);
+          }
+        } else {
+          if (!assets.admin.scripts.includes(scriptPath)) {
+            assets.admin.scripts.push(scriptPath);
+          }
+        }
+      }
+    }
+
     // 6. PARSER LES STYLES
+
+    // 6a. Parser les fonctions anonymes
     const styleBlockRegex = /add_action\s*\(\s*['"]([^'"]+)['"]\s*,\s*function\s*\([^)]*\)\s*\{([^}]*?wp_(?:register|enqueue)_style[^}]*)\}/gs;
 
     while ((blockMatch = styleBlockRegex.exec(functionsContent)) !== null) {
@@ -652,6 +751,53 @@ export async function detectAssetsFromWordPress() {
       const functionBody = blockMatch[2];
 
       // Capture seulement le 2ème argument (URL) jusqu'à la virgule suivante
+      const styleRegex = /wp_(?:register|enqueue)_style\s*\([^,]+,\s*([^,]+?)(?=\s*,|\s*\))/g;
+      let styleMatch;
+
+      while ((styleMatch = styleRegex.exec(functionBody)) !== null) {
+        const urlPattern = styleMatch[1].trim();
+
+        let stylePath = resolvePhpUrl(urlPattern, phpConstants, phpVariables);
+
+        if (stylePath.startsWith('http')) continue;
+
+        const sourcePath = findSourceFile(stylePath);
+        if (!sourcePath) {
+          console.warn(`   ⚠ Source introuvable pour: ${stylePath}`);
+          continue;
+        }
+
+        stylePath = sourcePath;
+
+        if (hook.includes('wp_enqueue_scripts')) {
+          if (!assets.front.styles.includes(stylePath)) {
+            assets.front.styles.push(stylePath);
+          }
+        } else if (hook.includes('enqueue_block_editor_assets')) {
+          if (!assets.editor.styles.includes(stylePath)) {
+            assets.editor.styles.push(stylePath);
+          }
+        } else if (hook.includes('enqueue_block_assets')) {
+          if (!assets.front.styles.includes(stylePath)) {
+            assets.front.styles.push(stylePath);
+          }
+          if (!assets.editor.styles.includes(stylePath)) {
+            assets.editor.styles.push(stylePath);
+          }
+        } else if (hook.includes('admin') || hook.includes('login') || hook.includes('customize_register')) {
+          if (!assets.admin.styles.includes(stylePath)) {
+            assets.admin.styles.push(stylePath);
+          }
+        } else {
+          if (!assets.admin.styles.includes(stylePath)) {
+            assets.admin.styles.push(stylePath);
+          }
+        }
+      }
+    }
+
+    // 6b. Parser les fonctions nommées pour les styles
+    for (const [hook, functionBody] of namedFunctions) {
       const styleRegex = /wp_(?:register|enqueue)_style\s*\([^,]+,\s*([^,]+?)(?=\s*,|\s*\))/g;
       let styleMatch;
 
