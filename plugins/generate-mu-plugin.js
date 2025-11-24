@@ -10,17 +10,11 @@
 
 import { PATHS } from '../paths.config.js';
 import { detectAssetsFromWordPress } from './wordpress-assets-detector.plugin.js';
-import { mkdirSync, writeFileSync, existsSync, unlinkSync, rmdirSync, readdirSync, readFileSync } from 'fs';
-import { resolve } from 'path';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import { platform } from 'os';
+import { getMultisiteSites, getSiteName } from './multisite-detector.plugin.js';
+import { mkdirSync, writeFileSync, existsSync, unlinkSync, rmdirSync, readdirSync, readFileSync, watch } from 'fs';
+import { resolve, dirname } from 'path';
 import dotenv from 'dotenv';
 
-const execAsync = promisify(exec);
-
-// Flag pour ouvrir le navigateur une seule fois
-let browserOpened = false;
 
 // Chemins du MU-plugin
 const muPluginsPath = PATHS.muPluginsPath;
@@ -119,7 +113,15 @@ function ensureBuildFolderInGitignore(buildFolder) {
  */
 async function generateMuPluginContent() {
   // Recharger les variables d'environnement depuis .env
-  const { HMR_BODY_RESET } = reloadEnvVars();
+  const envPath = resolve(PATHS.bundlerRoot, '.env');
+  let themeName = PATHS.themeName; // Valeur par défaut
+  let HMR_BODY_RESET = true;
+
+  if (existsSync(envPath)) {
+    const envConfig = dotenv.parse(readFileSync(envPath, 'utf8'));
+    themeName = envConfig.THEME_NAME || PATHS.themeName;
+    HMR_BODY_RESET = envConfig.HMR_BODY_RESET !== 'false';
+  }
 
   // Détecter les assets depuis WordPress
   const detectedAssets = await detectAssetsFromWordPress();
@@ -142,10 +144,21 @@ async function generateMuPluginContent() {
  * Pour regénérer: npm run dev dans vite-wp-bundler/
  */
 
-// Configuration Vite (depuis paths.config.js)
+// Configuration Vite (depuis paths.config.js et .env)
 define('VITE_DEV_MODE', true);
 define('VITE_URL', '${PATHS.viteUrl}');
 define('VITE_PORT', ${PATHS.vitePort});
+define('VITE_TARGET_THEME', '${themeName}'); // Thème ciblé (THEME_NAME depuis .env)
+
+/**
+ * Vérifie si le thème actuel correspond au thème ciblé par Vite
+ * Utilisé pour éviter d'injecter Vite sur d'autres thèmes en multisite
+ * Utilise get_template() qui retourne le slug du thème parent actif
+ */
+function vite_is_target_theme() {
+  \$current_theme = get_template();
+  return \$current_theme === VITE_TARGET_THEME;
+}
 
 /**
  * Auto-destruction si Vite n'est pas accessible
@@ -200,6 +213,12 @@ function vite_check_server_and_cleanup() {
   return true;
 }
 
+// Vérifier que le thème actuel est bien le thème ciblé
+// Si ce n'est pas le cas, ne rien faire (multisite avec différents thèmes)
+if (!vite_is_target_theme()) {
+  return; // Thème différent, ne pas injecter Vite
+}
+
 // Vérifier Vite au chargement du plugin
 if (!vite_check_server_and_cleanup()) {
   return; // Vite est down, plugin supprimé, arrêter ici
@@ -218,6 +237,11 @@ if (!vite_check_server_and_cleanup()) {
  * Les assets ADMIN ne sont PAS dequeued - WordPress les charge normalement
  */
 function vite_dequeue_build_assets_front() {
+  // Vérifier que c'est bien le thème ciblé
+  if (!vite_is_target_theme()) {
+    return;
+  }
+
   global \$vite_build_folder, \$vite_front_sources;
 
   foreach (\$vite_front_sources as \$sourcePath) {
@@ -287,6 +311,11 @@ add_action('wp_enqueue_scripts', 'vite_dequeue_build_assets_front', 9999);
  * S'exécute en dernier (priorité 99999) pour filtrer après tous les ajouts du theme
  */
 add_filter('wp_preload_resources', function(\$resources) {
+  // Vérifier que c'est bien le thème ciblé
+  if (!vite_is_target_theme()) {
+    return \$resources;
+  }
+
   global \$vite_build_folder;
 
   return array_filter(\$resources, function(\$resource) use (\$vite_build_folder) {
@@ -300,6 +329,11 @@ add_filter('wp_preload_resources', function(\$resources) {
  * Supprime uniquement les JS et CSS du dossier de build, pas les fonts
  */
 function vite_remove_build_assets_callback(\$html) {
+  // Vérifier que c'est bien le thème ciblé
+  if (!vite_is_target_theme()) {
+    return \$html;
+  }
+
   global \$vite_build_folder;
 
   // Supprimer les <link rel="stylesheet"> et <link rel="preload" as="style"> qui contiennent le dossier de build
@@ -311,8 +345,8 @@ function vite_remove_build_assets_callback(\$html) {
 
   // Supprimer les <link rel="preload" as="script"> qui contiennent le dossier de build
   \$html = preg_replace(
-    '/<link[^>]*rel=["\']preload["\'][^>]*as=["\']script["\'][^>]*' . preg_quote(\$vite_build_folder, '/') . '[^>]*\\.js[^>]*>/i',
-    '<!-- Vite Dev Mode: preload JS supprimé -->',
+    '/<link[^>]*rel=[\\x22\\x27]preload[\\x22\\x27][^>]*as=[\\x22\\x27]script[\\x22\\x27][^>]*' . preg_quote(\$vite_build_folder, '/') . '[^>]*\\.js[^>]*>/i',
+    '<!-- Vite Dev Mode: preload JS supprimé pour éviter les warnings -->',
     \$html
   );
 
@@ -351,6 +385,11 @@ add_action('shutdown', function() {
  * Fonction d'injection des assets Vite pour FRONT
  */
 function vite_inject_front_assets() {
+  // Vérifier que c'est bien le thème ciblé
+  if (!vite_is_target_theme()) {
+    return;
+  }
+
   global \$vite_front_sources;
 
   // Vérifier à nouveau que Vite est actif avant d'injecter
@@ -394,6 +433,11 @@ function vite_inject_front_assets() {
  * Fonction de debug FRONT
  */
 function vite_inject_front_debug() {
+  // Vérifier que c'est bien le thème ciblé
+  if (!vite_is_target_theme()) {
+    return;
+  }
+
   global \$vite_front_sources;
   echo "<!-- Vite Dev Mode actif [front] (" . count(\$vite_front_sources) . " assets injectés) -->\\n";
 }
@@ -407,81 +451,176 @@ add_action('wp_head', 'vite_inject_front_debug', 1);
 `;
 }
 
+
 /**
- * Ouvre l'URL WordPress dans le navigateur (une seule fois)
+ * Génère/régénère le MU-plugin WordPress
  */
-async function openBrowser() {
-  if (browserOpened) return;
-  browserOpened = true;
+async function regenerateMuPlugin() {
+  // Recharger les variables d'environnement
+  const { HMR_BODY_RESET } = reloadEnvVars();
 
-  const wpUrl = `${PATHS.wpProtocol}://${PATHS.wpHost}:${PATHS.wpPort}${PATHS.wpBasePath}`;
-
-  const os = platform();
-  const openCommand = os === 'win32' ? `start "" "${wpUrl}"` : os === 'darwin' ? `open "${wpUrl}"` : `xdg-open "${wpUrl}"`;
-
-  try {
-    await execAsync(openCommand);
-  } catch (err) {
-    // Silencieux en cas d'erreur
+  // Nettoyer l'ancien MU-plugin s'il existe
+  if (existsSync(muPluginFile)) {
+    try {
+      unlinkSync(muPluginFile);
+    } catch (err) {
+      // Le fichier peut être verrouillé par PHP/WordPress sous Windows
+      // On continue quand même, writeFileSync va écraser le contenu
+    }
   }
+
+  // Détecter les assets pour obtenir le buildFolder
+  const detectedAssets = await detectAssetsFromWordPress();
+  const buildFolder = detectedAssets.buildFolder;
+
+  // Générer le nouveau contenu
+  const muPluginContent = await generateMuPluginContent();
+
+  // Créer le dossier mu-plugins si nécessaire
+  if (!existsSync(muPluginsPath)) {
+    mkdirSync(muPluginsPath, { recursive: true });
+  }
+
+  // Écrire le MU-plugin
+  writeFileSync(muPluginFile, muPluginContent, 'utf8');
+
+  // Générer le .gitignore à côté du mu-plugin
+  const gitignoreContent = `# Fichiers générés automatiquement par vite-wp-bundler
+# Ne pas commiter - ils seront recréés automatiquement en mode dev
+vite-dev-mode.php
+`;
+  writeFileSync(muPluginGitignore, gitignoreContent, 'utf8');
+
+  // Ajouter le dossier de build au .gitignore racine WordPress
+  ensureBuildFolderInGitignore(buildFolder);
 }
 
 /**
  * Plugin Vite pour gérer le MU-plugin (génération en dev, suppression en build)
  */
 export function generateMuPluginPlugin() {
+  const ENV_HASH_FILE = resolve(PATHS.bundlerRoot, '.cache', '.env-hash');
+  let isDevMode = false;
+  let urlDisplayed = false;
+
   return {
     name: 'generate-mu-plugin',
 
-    async buildStart() {
-      const isDev = this.meta?.watchMode;
+    // S'exécute dès que la config Vite est résolue, AVANT le démarrage du serveur
+    async configResolved(config) {
+      isDevMode = config.command === 'serve';
 
-      // MODE DEV: Générer le MU-plugin
-      if (isDev) {
-        // Recharger les variables d'environnement
-        const { HMR_BODY_RESET } = reloadEnvVars();
+      if (isDevMode) {
+        // Calculer le hash du .env actuel
+        const envPath = resolve(PATHS.bundlerRoot, '.env');
+        let currentEnvHash = null;
+        if (existsSync(envPath)) {
+          const envContent = readFileSync(envPath, 'utf-8');
+          const crypto = await import('crypto');
+          currentEnvHash = crypto.createHash('md5').update(envContent).digest('hex');
+        }
 
-        // Nettoyer l'ancien MU-plugin s'il existe
-        if (existsSync(muPluginFile)) {
+        // Lire le hash précédent depuis le fichier
+        let lastEnvHash = null;
+        if (existsSync(ENV_HASH_FILE)) {
           try {
-            unlinkSync(muPluginFile);
+            lastEnvHash = readFileSync(ENV_HASH_FILE, 'utf-8').trim();
           } catch (err) {
-            // Le fichier peut être verrouillé par PHP/WordPress sous Windows
-            // On continue quand même, writeFileSync va écraser le contenu
+            // Fichier corrompu, on ignore
           }
         }
 
-        // Détecter les assets pour obtenir le buildFolder
-        const detectedAssets = await detectAssetsFromWordPress();
-        const buildFolder = detectedAssets.buildFolder;
+        // Régénérer le MU-plugin si:
+        // 1. Premier démarrage (pas de hash)
+        // 2. .env a changé
+        // 3. Le MU-plugin n'existe pas (même si le hash existe)
+        const muPluginExists = existsSync(muPluginFile);
 
-        // Générer le nouveau contenu
-        const muPluginContent = await generateMuPluginContent();
+        if (lastEnvHash === null || !muPluginExists) {
+          // Premier démarrage OU MU-plugin supprimé
+          console.log('Génération du MU-plugin WordPress...');
+          await regenerateMuPlugin();
 
-        // Créer le dossier mu-plugins si nécessaire
-        if (!existsSync(muPluginsPath)) {
-          mkdirSync(muPluginsPath, { recursive: true });
+          // Sauvegarder le hash
+          const cacheDir = dirname(ENV_HASH_FILE);
+          if (!existsSync(cacheDir)) {
+            mkdirSync(cacheDir, { recursive: true });
+          }
+          writeFileSync(ENV_HASH_FILE, currentEnvHash || '', 'utf-8');
+        } else if (currentEnvHash !== lastEnvHash) {
+          // .env a changé - mettre à jour le hash
+          // La régénération sera gérée par le watcher dans configureServer()
+          writeFileSync(ENV_HASH_FILE, currentEnvHash || '', 'utf-8');
         }
-
-        // Écrire le MU-plugin
-        writeFileSync(muPluginFile, muPluginContent, 'utf8');
-
-        // Générer le .gitignore à côté du mu-plugin
-        const gitignoreContent = `# Fichiers générés automatiquement par vite-wp-bundler
-# Ne pas commiter - ils seront recréés automatiquement en mode dev
-vite-dev-mode.php
-`;
-        writeFileSync(muPluginGitignore, gitignoreContent, 'utf8');
-
-        // Ajouter le dossier de build au .gitignore racine WordPress
-        ensureBuildFolderInGitignore(buildFolder);
-
-        // Ouvrir le navigateur (une seule fois)
-        await openBrowser();
-      }
-      // MODE BUILD: Supprimer le MU-plugin s'il existe
-      else {
+      } else {
+        // MODE BUILD: Supprimer le MU-plugin s'il existe
         deleteMuPlugin();
+      }
+    },
+
+    // Afficher l'URL WordPress après le démarrage du serveur
+    configureServer(server) {
+      if (!urlDisplayed) {
+        server.httpServer?.once('listening', async () => {
+          urlDisplayed = true;
+          const wpUrl = `${PATHS.wpProtocol}://${PATHS.wpHost}:${PATHS.wpPort}${PATHS.wpBasePath}`;
+
+          // Tenter de détecter le multisite (ne bloque pas en cas d'erreur)
+          try {
+            const sites = await getMultisiteSites();
+            if (sites && sites.length > 0) {
+              // Multisite détecté : afficher la liste des sites
+              sites.forEach(site => {
+                console.log(`  • ${site.name} (\x1b[32m${site.url}\x1b[0m)`);
+              });
+            } else {
+              // Pas de multisite : récupérer le nom du site et afficher avec le même format
+              const siteName = await getSiteName();
+              if (siteName) {
+                console.log(`  • ${siteName} (\x1b[32m${wpUrl}\x1b[0m)`);
+              } else {
+                // Fallback si le nom n'est pas trouvé
+                console.log(`  Homepage: \x1b[32m${wpUrl}\x1b[0m`);
+              }
+            }
+          } catch (err) {
+            // En cas d'erreur : fallback sur Homepage
+            console.log(`  Homepage: \x1b[32m${wpUrl}\x1b[0m`);
+          }
+
+          // Surveiller les changements du .env pour régénérer le MU-plugin et recharger les pages
+          const envPath = resolve(PATHS.bundlerRoot, '.env');
+          let lastEnvContent = existsSync(envPath) ? readFileSync(envPath, 'utf-8') : '';
+          let debounceTimer = null;
+
+          const watcher = watch(envPath, async (eventType) => {
+            // Debounce: attendre 100ms avant de traiter le changement
+            if (debounceTimer) clearTimeout(debounceTimer);
+
+            debounceTimer = setTimeout(async () => {
+              const currentEnvContent = existsSync(envPath) ? readFileSync(envPath, 'utf-8') : '';
+              if (currentEnvContent === lastEnvContent) return;
+
+              lastEnvContent = currentEnvContent;
+
+              console.log('\n.env modifié - Régénération du MU-plugin WordPress...');
+              await regenerateMuPlugin();
+              console.log('MU-plugin régénéré avec les nouvelles variables .env\n');
+
+              // Recharger toutes les pages (même syntaxe que le plugin PHP reload)
+              server.ws.send({
+                type: 'full-reload',
+                path: '*',
+              });
+              console.log('📡 Rechargement des pages WordPress...\n');
+            }, 100);
+          });
+
+          // Nettoyer le watcher à la fermeture
+          server.httpServer?.on('close', () => {
+            if (watcher) watcher.close();
+          });
+        });
       }
     }
   };

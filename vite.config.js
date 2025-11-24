@@ -111,8 +111,10 @@ export default defineConfig(async ({ command }) => {
     // Tue uniquement les processus Node.js qui bloquent VITE_PORT
     ...(command === 'serve' ? [portKillerPlugin(PATHS.vitePort)] : []),
 
-    // Plugin pour nettoyer le MU-plugin quand Vite s'arrête (Ctrl+C)
-    ...(command === 'serve' ? [cleanupMuPluginOnClose()] : []),
+    // Plugin pour nettoyer le MU-plugin et incrémenter la version
+    // Dev : nettoie le MU-plugin quand Vite s'arrête (Ctrl+C) - désactivé pour éviter les crashes PowerShell
+    // Build : incrémente la version du thème via closeBundle()
+    ...(command === 'build' ? [cleanupMuPluginOnClose()] : []),
 
     // Plugin pour charger les libs minifiées sans transformation (uniquement en mode dev)
     ...(command === 'serve' ? [{
@@ -138,7 +140,7 @@ export default defineConfig(async ({ command }) => {
     // Plugin personnalisé de reload PHP avec debounce intelligent
     // Évite les reloads multiples en groupant les changements
     // CSS/SCSS/JS sont gérés nativement par Vite avec HMR
-    ...(WATCH_PHP ? [phpReloadPlugin()] : []),
+    ...(command === 'serve' && WATCH_PHP ? [phpReloadPlugin()] : []),
 
     // Plugin personnalisé pour ignorer les sourcemaps des fichiers minifiés
     {
@@ -382,6 +384,11 @@ export default defineConfig(async ({ command }) => {
     info: (msg) => {
       // Masquer le message "Local: http://localhost:PORT/" (déjà affiché par generate-mu-plugin)
       if (msg.includes('Local:') || (msg.includes('localhost') && msg.includes(String(PATHS.vitePort)))) {
+        return; // Ne rien afficher
+      }
+
+      // Masquer le message d'aide de Vite
+      if (msg.includes('press') && msg.includes('enter') && msg.includes('help')) {
         return; // Ne rien afficher
       }
 

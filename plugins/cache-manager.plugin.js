@@ -12,11 +12,21 @@ const CACHE_DIR = resolve(PATHS.bundlerRoot, '.cache');
 const CACHE_FILE = resolve(CACHE_DIR, 'assets-cache.json');
 
 /**
- * Calcule un hash MD5 du contenu de tous les fichiers PHP scannés
+ * Calcule un hash MD5 du contenu de tous les fichiers PHP scannés + fichier .env complet
+ * Le .env est inclus pour invalider le cache dès que n'importe quelle config change
  */
 function calculatePhpFilesHash() {
   const hashes = [];
 
+  // 1. Hasher le fichier .env complet pour détecter tout changement de configuration
+  const envPath = resolve(PATHS.bundlerRoot, '.env');
+  if (existsSync(envPath)) {
+    const envContent = readFileSync(envPath, 'utf-8');
+    const envHash = createHash('md5').update(envContent).digest('hex');
+    hashes.push(`.env:${envHash}`);
+  }
+
+  // 2. Hasher les fichiers PHP scannés
   for (const phpFile of PHP_FILES_TO_SCAN) {
     const phpFilePath = resolve(PATHS.themePath, phpFile);
 
