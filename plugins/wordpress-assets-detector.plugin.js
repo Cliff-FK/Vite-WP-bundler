@@ -652,8 +652,15 @@ export async function detectAssetsFromWordPress() {
         // Résoudre l'URL complète avec constantes et variables
         let scriptPath = resolvePhpUrl(urlPattern, phpConstants, phpVariables);
 
-        // Ignorer les URLs externes, les false/null, et les variables JS
-        if (scriptPath.startsWith('http') || scriptPath === 'false' || scriptPath === 'null' || !scriptPath.includes('.')) continue;
+        // Ignorer les URLs externes, les false/null, les variables JS et le code JS inline WordPress
+        if (
+          scriptPath.startsWith('http') ||
+          scriptPath === 'false' ||
+          scriptPath === 'null' ||
+          !scriptPath.includes('.') ||
+          scriptPath.startsWith('wp.') ||  // wp.domReady, wp.i18n, etc.
+          scriptPath.includes('(')  // Code JS inline
+        ) continue;
 
         // Convertir build → source avec la nouvelle logique
         const sourcePath = findSourceFile(scriptPath);
@@ -702,8 +709,15 @@ export async function detectAssetsFromWordPress() {
 
         let scriptPath = resolvePhpUrl(urlPattern, phpConstants, phpVariables);
 
-        // Ignorer les URLs externes, les false/null, et les variables JS
-        if (scriptPath.startsWith('http') || scriptPath === 'false' || scriptPath === 'null' || !scriptPath.includes('.')) continue;
+        // Ignorer les URLs externes, les false/null, les variables JS et le code JS inline WordPress
+        if (
+          scriptPath.startsWith('http') ||
+          scriptPath === 'false' ||
+          scriptPath === 'null' ||
+          !scriptPath.includes('.') ||
+          scriptPath.startsWith('wp.') ||  // wp.domReady, wp.i18n, etc.
+          scriptPath.includes('(')  // Code JS inline
+        ) continue;
 
         const sourcePath = findSourceFile(scriptPath);
         if (!sourcePath) {

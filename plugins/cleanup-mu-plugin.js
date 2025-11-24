@@ -27,22 +27,19 @@ export function cleanupMuPluginOnClose() {
       if (!existsSync(stylePath)) return;
 
       let content = readFileSync(stylePath, 'utf-8');
-
-      // Chercher "Version: X.Y"
       const versionMatch = content.match(/Version:\s*(\d+)\.(\d+)/);
-      if (versionMatch) {
-        const major = parseInt(versionMatch[1]);
-        const minor = parseInt(versionMatch[2]);
-        const newMinor = minor + 1;
-        const newVersion = `${major}.${newMinor}`;
+      if (!versionMatch) return;
 
-        // Remplacer la version
-        content = content.replace(/Version:\s*\d+\.\d+/, `Version: ${newVersion}`);
-        writeFileSync(stylePath, content, 'utf-8');
-        console.log(`\n📝 Version du thème incrémentée: ${major}.${minor} → ${newVersion}`);
-      }
+      const major = parseInt(versionMatch[1]);
+      const minor = parseInt(versionMatch[2]);
+      const newMinor = minor + 1;
+      const newVersion = `${major}.${newMinor}`;
+
+      content = content.replace(/Version:\s*\d+\.\d+/, `Version: ${newVersion}`);
+      writeFileSync(stylePath, content, 'utf-8');
+      console.log(`\n📝 Version du thème incrémentée: ${major}.${minor} → ${newVersion}`);
     } catch (err) {
-      // Silencieux
+      return;
     }
   };
 
@@ -65,31 +62,10 @@ export function cleanupMuPluginOnClose() {
 
   return {
     name: 'cleanup-mu-plugin',
-    configResolved() {
-      // Enregistrer les handlers de signaux une seule fois globalement
-      if (!signalsRegistered) {
-        signalsRegistered = true;
 
-        // Augmenter la limite de listeners pour éviter les warnings
-        process.setMaxListeners(20);
-
-        // Ctrl+C - Incrémenter la version uniquement (pas de suppression du MU-plugin)
-        process.once('SIGINT', () => {
-          cleanupOnClose();
-          process.exit(0);
-        });
-
-        // Kill - Incrémenter la version uniquement (pas de suppression du MU-plugin)
-        process.once('SIGTERM', () => {
-          cleanupOnClose();
-          process.exit(0);
-        });
-
-        // Fermeture normale - Incrémenter la version uniquement
-        process.once('exit', () => {
-          cleanupOnClose();
-        });
-      }
+    // closeBundle s'exécute uniquement en mode build
+    closeBundle() {
+      cleanupOnClose();
     }
   };
 }

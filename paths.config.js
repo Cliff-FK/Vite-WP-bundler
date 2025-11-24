@@ -367,6 +367,12 @@ export const HMR_BODY_RESET = process.env.HMR_BODY_RESET !== 'false';
 export const AUTO_INCREMENT_VERSION = process.env.AUTO_INCREMENT_VERSION !== 'false';
 
 /**
+ * Lance automatiquement un build à l'arrêt du mode dev (défaut: false)
+ * Si activé, chaque arrêt propre de `npm run dev` déclenche un `npm run build`
+ */
+export const BUILD_ON_EXIT = process.env.BUILD_ON_EXIT === 'true';
+
+/**
  * Liste des fichiers PHP à scanner pour détecter les enqueues
  * Par défaut: ['functions.php']
  * Exemple: ['functions.php', 'inc/enqueue.php', 'lib/assets.php']

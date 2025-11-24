@@ -41,5 +41,9 @@
     "dev-server",
     "hmr",
     "hot-reload"
-  ]
+  ],
+  "dependencies": {
+    "html-entities": "^2.6.0",
+    "mysql2": "^3.15.3"
+  }
 }
