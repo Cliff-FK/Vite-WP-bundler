@@ -536,8 +536,8 @@ export function generateMuPluginPlugin() {
         // 3. Le MU-plugin n'existe pas (même si le hash existe)
         const muPluginExists = existsSync(muPluginFile);
 
-        if (lastEnvHash === null || !muPluginExists) {
-          // Premier démarrage OU MU-plugin supprimé
+        if (lastEnvHash === null || !muPluginExists || currentEnvHash !== lastEnvHash) {
+          // Premier démarrage OU MU-plugin supprimé OU .env modifié
           console.log('Génération du MU-plugin WordPress...');
           await regenerateMuPlugin();
 
@@ -546,10 +546,6 @@ export function generateMuPluginPlugin() {
           if (!existsSync(cacheDir)) {
             mkdirSync(cacheDir, { recursive: true });
           }
-          writeFileSync(ENV_HASH_FILE, currentEnvHash || '', 'utf-8');
-        } else if (currentEnvHash !== lastEnvHash) {
-          // .env a changé - mettre à jour le hash
-          // La régénération sera gérée par le watcher dans configureServer()
           writeFileSync(ENV_HASH_FILE, currentEnvHash || '', 'utf-8');
         }
       } else {
