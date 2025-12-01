@@ -124,8 +124,9 @@
       const scriptPromises = [];
 
       viteSourceScripts.forEach(scriptInfo => {
-        // Ne réinjecter que si c'est un script du thème (pas hmr-body-reset.js)
-        if (!scriptInfo.path.includes('hmr-body-reset.js')) {
+        // Ne réinjecter que les modules custom du thème
+        // Exclure: hmr-body-reset.js et les libs tierces (_libs/) qui ne supportent pas le re-boot
+        if (!scriptInfo.path.includes('hmr-body-reset.js') && !scriptInfo.path.includes('/_libs/')) {
           const promise = new Promise((resolve) => {
             const script = document.createElement('script');
             script.type = 'module';
@@ -145,13 +146,19 @@
         // Restaurer le HTML du body
         document.body.innerHTML = originalBodyHTML;
 
-        // 7. Déclencher manuellement un événement DOMContentLoaded custom pour que les modules se réinitialisent
+        // 7. Déclencher l'événement approprié pour réinitialiser les modules
         setTimeout(() => {
-          const event = new Event('DOMContentLoaded', {
-            bubbles: true,
-            cancelable: false
-          });
-          document.dispatchEvent(event);
+          // Si Unpoly est présent, utiliser son événement (le thème écoute up:fragment:inserted)
+          // Sinon utiliser DOMContentLoaded
+          if (typeof up !== 'undefined' && up.emit) {
+            up.emit('up:fragment:inserted', { target: document.body });
+          } else {
+            const event = new Event('DOMContentLoaded', {
+              bubbles: true,
+              cancelable: false
+            });
+            document.dispatchEvent(event);
+          }
 
           // 8. Restaurer la position du scroll après un court délai pour que les modules s'initialisent
           setTimeout(() => {
