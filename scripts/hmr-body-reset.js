@@ -15,11 +15,11 @@
 (function() {
   'use strict';
 
-  // Mode debug (mettre à false pour désactiver les logs détaillés)
-  const DEBUG = false;
+  // Mode debug (mettre à true pour activer les logs détaillés)
+  const DEBUG = true;
 
-  // Cache du HTML original du body
-  let originalBodyHTML = null;
+  // Cache du body original (outerHTML) - capturé IMMÉDIATEMENT avant les scripts du thème
+  let originalBodyOuterHTML = document.body ? document.body.outerHTML : null;
 
   // Liste des scripts JS Vite sources à réinjecter (seulement .js, pas .scss/.css)
   let viteSourceScripts = [];
@@ -60,14 +60,9 @@
   }
 
   /**
-   * Sauvegarde le HTML du body et détecte les scripts JS Vite
+   * Détecte les scripts JS Vite (le HTML est déjà capturé à l'initialisation)
    */
   function captureInitialState() {
-    // Sauvegarder le HTML du body
-    if (!originalBodyHTML && document.body) {
-      originalBodyHTML = document.body.innerHTML;
-    }
-
     // Détecter uniquement les scripts JS externes (type="module" avec src="/@fs/" et .js)
     const externalScripts = document.querySelectorAll('script[type="module"][src*="/@fs/"]');
     viteSourceScripts = Array.from(externalScripts)
@@ -82,7 +77,7 @@
    * Réinitialise le body et réinjecte les scripts Vite
    */
   function resetBodyAndReinjectScripts() {
-    if (!originalBodyHTML) {
+    if (!originalBodyOuterHTML) {
       return;
     }
 
@@ -119,8 +114,10 @@
       newBody.innerHTML = ''; // Body vide temporairement
       oldBody.parentNode.replaceChild(newBody, oldBody);
 
-      // 5. Réinjecter les scripts du thème avec timestamp et attendre leur chargement
+      // 5. Reset des flags globaux des modules AVANT de réinjecter les scripts
+      if (window.mdlEventInit) delete window.mdlEventInit;
 
+      // 6. Réinjecter les scripts du thème avec timestamp et attendre leur chargement
       const scriptPromises = [];
 
       viteSourceScripts.forEach(scriptInfo => {
@@ -141,12 +138,12 @@
         }
       });
 
-      // 6. Une fois TOUS les scripts chargés, restaurer le body
+      // 7. Une fois TOUS les scripts chargés, restaurer le body complet
       Promise.all(scriptPromises).then(() => {
-        // Restaurer le HTML du body
-        document.body.innerHTML = originalBodyHTML;
+        // Remplacer le body entier (outerHTML inclut les attributs class, id, etc.)
+        document.body.outerHTML = originalBodyOuterHTML;
 
-        // 7. Déclencher l'événement approprié pour réinitialiser les modules
+        // 8. Déclencher l'événement approprié pour réinitialiser les modules
         setTimeout(() => {
           // Si Unpoly est présent, utiliser son événement (le thème écoute up:fragment:inserted)
           // Sinon utiliser DOMContentLoaded
