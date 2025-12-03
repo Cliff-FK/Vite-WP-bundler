@@ -15,15 +15,15 @@ function runBuildIfNeeded() {
   if (isExiting || !BUILD_ON_EXIT) return;
   isExiting = true;
 
-  console.log('\n🔨 Lancement du build automatique...\n');
-
+  
   const buildResult = spawnSync('npm', ['run', 'build'], {
     cwd: bundlerRoot,
     shell: true,
     stdio: 'inherit'
   });
 
-  process.exit(buildResult.status || 0);
+  // Laisser Node terminer naturellement pour que PowerShell affiche son prompt
+  process.exitCode = buildResult.status || 0;
 }
 
 /**
@@ -43,21 +43,22 @@ const viteProcess = spawn('vite', [], {
 viteProcess.on('error', (err) => {
   console.error('Erreur lors du démarrage de Vite:', err);
   runBuildIfNeeded();
-  if (!isExiting) process.exit(0);
+  // Laisser Node terminer naturellement
 });
 
 // Gérer la fermeture propre de Vite
 viteProcess.on('exit', (code, signal) => {
   runBuildIfNeeded();
-  if (!isExiting) process.exit(0);
+  // Laisser Node terminer naturellement
 });
 
 // Intercepter Ctrl+C (SIGINT)
 process.on('SIGINT', () => {
+  console.log(''); // Forcer un retour à la ligne propre
   viteProcess.kill('SIGINT');
   setTimeout(() => {
     runBuildIfNeeded();
-  }, 100);
+  }, 250); // Délai pour laisser Vite libérer les fichiers
 });
 
 // Intercepter SIGTERM
@@ -65,7 +66,7 @@ process.on('SIGTERM', () => {
   viteProcess.kill('SIGTERM');
   setTimeout(() => {
     runBuildIfNeeded();
-  }, 100);
+  }, 250); // Délai pour laisser Vite libérer les fichiers
 });
 
 // Intercepter la fermeture du terminal
@@ -73,4 +74,6 @@ process.on('exit', () => {
   if (!isExiting && viteProcess.pid) {
     viteProcess.kill();
   }
+  // Réinitialiser le terminal et afficher un faux prompt PowerShell
+  process.stdout.write(`\x1b[0m\x1b[?25h\nPS ${process.cwd()}> `);
 });

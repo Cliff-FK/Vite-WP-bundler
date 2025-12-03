@@ -37,7 +37,7 @@ export function cleanupMuPluginOnClose() {
 
       content = content.replace(/Version:\s*\d+\.\d+/, `Version: ${newVersion}`);
       writeFileSync(stylePath, content, 'utf-8');
-      console.log(`\n📝 Version du thème incrémentée: ${major}.${minor} → ${newVersion}`);
+      console.log(`\nVersion du thème incrémentée: ${major}.${minor} → ${newVersion}`);
     } catch (err) {
       return;
     }
