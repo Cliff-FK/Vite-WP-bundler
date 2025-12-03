@@ -142,6 +142,32 @@ export default defineConfig(async ({ command }) => {
     // CSS/SCSS/JS sont gérés nativement par Vite avec HMR
     ...(command === 'serve' && WATCH_PHP ? [phpReloadPlugin()] : []),
 
+    // Plugin pour logger le fichier SCSS source modifié (pas le fichier final compilé)
+    ...(command === 'serve' ? [{
+      name: 'scss-source-logger',
+      handleHotUpdate({ file, server }) {
+        if (file.endsWith('.scss')) {
+          const now = new Date();
+          const time = now.toLocaleTimeString('fr-FR', { hour12: false });
+          const dim = '\x1b[2m';
+          const cyan = '\x1b[36m';
+          const bold = '\x1b[1m';
+          const green = '\x1b[32m';
+          const reset = '\x1b[0m';
+
+          const normalizedPath = file.replace(/\\/g, '/');
+          const wpRootNormalized = PATHS.wpRoot.replace(/\\/g, '/');
+          const rootFolderName = wpRootNormalized.split('/').pop();
+          const rootIndex = normalizedPath.lastIndexOf(rootFolderName + '/');
+          const relativePath = rootIndex !== -1
+            ? normalizedPath.substring(rootIndex)
+            : normalizedPath;
+
+          console.log(`${dim}${time}${reset} ${bold}${cyan}[vite]${reset} ${green}hmr update${reset} ${dim}${relativePath}${reset}`);
+        }
+      },
+    }] : []),
+
     // Plugin personnalisé pour ignorer les sourcemaps des fichiers minifiés
     {
       name: 'ignore-minified-sourcemaps',
@@ -397,6 +423,11 @@ export default defineConfig(async ({ command }) => {
           msg.includes('rendering chunks') ||
           msg.includes('computing gzip size') ||
           msg.includes('modules transformed')) {
+        return;
+      }
+
+      // Masquer le hmr update pour les SCSS (déjà loggé par scss-source-logger)
+      if (msg.includes('hmr update') && msg.includes('.scss')) {
         return;
       }
 
