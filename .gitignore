@@ -3,6 +3,7 @@
 ############################################
 
 # Racine
+vite.config.js.timestamp-*
 node_modules/
 .claude/
 .cache/
