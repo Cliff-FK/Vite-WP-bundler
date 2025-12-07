@@ -4,6 +4,7 @@
 
 # Racine
 vite.config.js.timestamp-*
+package-lock.json
 node_modules/
 .claude/
 .cache/
