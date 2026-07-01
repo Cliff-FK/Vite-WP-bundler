@@ -17,6 +17,16 @@ import { serveStaticAssetsPlugin } from './plugins/serve-static-assets.plugin.js
 import sassGlobImports from 'vite-plugin-sass-glob-import';
 import { resolve } from 'path';
 
+// Filtre les warnings cosmétiques de vite-plugin-sass-glob-import : il warn "Directories don't exist"
+// sur les patterns extglob avec wildcards en début de chemin (ex: `bloc-parts/!(_libs)/**/...`), mais
+// le glob s'exécute correctement et le bundle est bien filtré. Check naïf bugué côté plugin (cf.
+// node_modules/vite-plugin-sass-glob-import/src/index.ts:62). Pas d'option `quiet` exposée.
+const _origWarn = console.warn;
+console.warn = function (...args) {
+    if (args[0] && typeof args[0] === 'string' && args[0].includes("Sass Glob Import: Directories don't exist")) return;
+    return _origWarn.apply(console, args);
+};
+
 export default defineConfig(async ({ command }) => {
   // console.log('[Vite Config] Command:', command);
 
