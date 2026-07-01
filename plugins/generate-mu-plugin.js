@@ -259,7 +259,13 @@ function vite_dequeue_build_assets_front() {
     // Détecter et dequeue les styles
     if (strpos(\$buildPath, '.css') !== false && !empty(\$wp_styles->registered)) {
       foreach (\$wp_styles->registered as \$handle => \$style) {
-        if (!empty(\$style->src) && (
+        // Ancrage au dossier de build du thème (\$vite_build_folder, ex "dist/"). Sans lui, le fallback
+        // par nom de fichier (\$fileName) attrape les CSS core WP homonymes : TOUS les blocs core ont un
+        // "wp-includes/blocks/*/style.min.css", donc \$fileName="style.min.css" dequeuait par erreur le CSS
+        // responsive de core/navigation (burger + menu desktop affichés simultanément en dev). Les assets
+        // de build du thème vivent tous sous \$vite_build_folder/, jamais sous wp-includes/.
+        \$in_build_folder = strpos(\$style->src, \$vite_build_folder . '/') !== false;
+        if (!empty(\$style->src) && \$in_build_folder && (
           strpos(\$style->src, \$searchPath) !== false ||
           strpos(\$style->src, \$fileName) !== false
         )) {
@@ -288,7 +294,10 @@ function vite_dequeue_build_assets_front() {
     // Détecter et dequeue les scripts
     if (strpos(\$buildPath, '.js') !== false && !empty(\$wp_scripts->registered)) {
       foreach (\$wp_scripts->registered as \$handle => \$script) {
-        if (!empty(\$script->src) && (
+        // Même ancrage que pour les styles : le fallback \$fileName ne doit matcher que dans le dossier
+        // de build du thème, jamais un script core WP homonyme.
+        \$in_build_folder = strpos(\$script->src, \$vite_build_folder . '/') !== false;
+        if (!empty(\$script->src) && \$in_build_folder && (
           strpos(\$script->src, \$searchPath) !== false ||
           strpos(\$script->src, \$fileName) !== false
         )) {
@@ -336,23 +345,29 @@ function vite_remove_build_assets_callback(\$html) {
 
   global \$vite_build_folder;
 
+  // Marqueur ANCRÉ au thème : "{dossier-theme}/{build}" (ex "themezero/dist"). \$vite_build_folder seul
+  // ("dist") matchait aussi le "dist" de WordPress core : wp-includes/js/dist/script-modules/*. Les
+  // script modules de l'Interactivity API (ex. core/navigation view) étaient donc supprimés du HTML en
+  // dev alors que WP les avait bien imprimés → clic burger mort. On n'ancre qu'au build DU thème.
+  \$theme_build_marker = basename(get_template_directory()) . '/' . ltrim(\$vite_build_folder, '/'); // ex "themezero/dist" (\$vite_build_folder peut valoir "/dist")
+
   // Supprimer les <link rel="stylesheet"> et <link rel="preload" as="style"> qui contiennent le dossier de build
   \$html = preg_replace(
-    '/<link[^>]*' . preg_quote(\$vite_build_folder, '/') . '[^>]*\\.css[^>]*>/i',
+    '/<link[^>]*' . preg_quote(\$theme_build_marker, '/') . '[^>]*\\.css[^>]*>/i',
     '<!-- Vite Dev Mode: CSS supprimé -->',
     \$html
   );
 
   // Supprimer les <link rel="preload" as="script"> qui contiennent le dossier de build
   \$html = preg_replace(
-    '/<link[^>]*rel=[\\x22\\x27]preload[\\x22\\x27][^>]*as=[\\x22\\x27]script[\\x22\\x27][^>]*' . preg_quote(\$vite_build_folder, '/') . '[^>]*\\.js[^>]*>/i',
+    '/<link[^>]*rel=[\\x22\\x27]preload[\\x22\\x27][^>]*as=[\\x22\\x27]script[\\x22\\x27][^>]*' . preg_quote(\$theme_build_marker, '/') . '[^>]*\\.js[^>]*>/i',
     '<!-- Vite Dev Mode: preload JS supprimé pour éviter les warnings -->',
     \$html
   );
 
   // Supprimer toutes les balises <script> qui contiennent le dossier de build
   \$html = preg_replace(
-    '/<script[^>]*' . preg_quote(\$vite_build_folder, '/') . '[^>]*\\.js[^>]*>.*?<\\/script>/is',
+    '/<script[^>]*' . preg_quote(\$theme_build_marker, '/') . '[^>]*\\.js[^>]*>.*?<\\/script>/is',
     '<!-- Vite Dev Mode: script JS supprimé -->',
     \$html
   );
@@ -446,8 +461,12 @@ function vite_inject_front_debug() {
  * Injecter les assets Vite dans le <head> - FRONT uniquement
  * L'admin WordPress (y compris l'éditeur Gutenberg) utilise les assets de build normaux
  */
-add_action('wp_head', 'vite_inject_front_assets', 1);
-add_action('wp_head', 'vite_inject_front_debug', 1);
+// Priorité 20 (APRÈS l'import map WP, imprimée sur wp_head en priorité 10). La spec HTML impose qu'une
+// import map précède TOUT <script type="module"> : injecter @vite/client (module) en priorité 1 la plaçait
+// AVANT l'import map, qui était alors ignorée par le navigateur → @wordpress/interactivity ne se résolvait
+// plus → les blocs core interactifs (ex. core/navigation : clic burger) restaient morts en dev uniquement.
+add_action('wp_head', 'vite_inject_front_assets', 20);
+add_action('wp_head', 'vite_inject_front_debug', 20);
 `;
 }
 
