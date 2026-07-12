@@ -1,7 +1,9 @@
 import { spawn, spawnSync } from 'child_process';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import { readdirSync, unlinkSync } from 'fs';
 import { BUILD_ON_EXIT } from '../paths.config.js';
+import { deleteMuPlugin } from '../plugins/generate-mu-plugin.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const bundlerRoot = resolve(__dirname, '..');
@@ -9,13 +11,34 @@ const bundlerRoot = resolve(__dirname, '..');
 let isExiting = false;
 
 /**
- * Lance le build si BUILD_ON_EXIT est activé
+ * Purge les fichiers temporaires de chargement de config Vite
+ * (vite.config.js.timestamp-*.mjs, laissés sur disque après un crash)
  */
-function runBuildIfNeeded() {
-  if (isExiting || !BUILD_ON_EXIT) return;
+function cleanStaleTimestamps() {
+  try {
+    for (const f of readdirSync(bundlerRoot)) {
+      if (/^vite\.config\.js\.timestamp-.*\.mjs$/.test(f)) {
+        try { unlinkSync(resolve(bundlerRoot, f)); } catch (err) { /* Ignorer */ }
+      }
+    }
+  } catch (err) { /* Ignorer */ }
+}
+
+/**
+ * Nettoyage de sortie : TOUJOURS retirer le MU-plugin et les fichiers temporaires
+ * (même si BUILD_ON_EXIT=false — sinon les traces dev survivent jusqu'à la
+ * prochaine visite de page qui déclenche l'auto-destruction PHP), puis build
+ * de production si configuré
+ */
+function runExitCleanup() {
+  if (isExiting) return;
   isExiting = true;
 
-  
+  try { deleteMuPlugin(); } catch (err) { /* Ignorer */ }
+  cleanStaleTimestamps();
+
+  if (!BUILD_ON_EXIT) return;
+
   const buildResult = spawnSync('npm', ['run', 'build'], {
     cwd: bundlerRoot,
     shell: true,

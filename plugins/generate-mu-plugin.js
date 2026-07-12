@@ -34,10 +34,14 @@ export function deleteMuPlugin() {
       // On ignore l'erreur silencieusement
     }
 
-    // Supprimer aussi le .gitignore associé
+    // Supprimer aussi le .gitignore associé — SEULEMENT s'il porte la signature
+    // du bundler (ne jamais supprimer un .gitignore posé par l'utilisateur)
     try {
       if (existsSync(muPluginGitignore)) {
-        unlinkSync(muPluginGitignore);
+        const gitignoreContent = readFileSync(muPluginGitignore, 'utf8');
+        if (gitignoreContent.includes('vite-wp-bundler')) {
+          unlinkSync(muPluginGitignore);
+        }
       }
     } catch (err) {
       // Ignorer les erreurs
@@ -150,6 +154,7 @@ async function generateMuPluginContent() {
 define('VITE_DEV_MODE', true);
 define('VITE_URL', '${PATHS.viteUrl}');
 define('VITE_PORT', ${PATHS.vitePort});
+define('VITE_DEV_HOST', '${PATHS.viteHost}'); // Hôte du serveur Vite (VITE_HOST depuis .env)
 define('VITE_TARGET_THEME', '${themeName}'); // Thème ciblé (THEME_NAME depuis .env)
 
 /**
@@ -160,6 +165,32 @@ define('VITE_TARGET_THEME', '${themeName}'); // Thème ciblé (THEME_NAME depuis
 function vite_is_target_theme() {
   \$current_theme = get_template();
   return \$current_theme === VITE_TARGET_THEME;
+}
+
+/**
+ * Auto-destruction COMPLÈTE : supprime ce fichier, le .gitignore généré par le
+ * bundler (signature vérifiée pour ne jamais toucher un .gitignore utilisateur)
+ * et le dossier mu-plugins s'il est vide. Objectif : zéro trace hors mode dev.
+ */
+function vite_self_destruct() {
+  $muPluginsDir = dirname(__FILE__);
+
+  @unlink(__FILE__);
+
+  // Supprimer le .gitignore SEULEMENT s'il porte la signature du bundler
+  $gitignore = $muPluginsDir . '/.gitignore';
+  if (@is_file($gitignore)) {
+    $gitignoreContent = @file_get_contents($gitignore);
+    if ($gitignoreContent !== false && strpos($gitignoreContent, 'vite-wp-bundler') !== false) {
+      @unlink($gitignore);
+    }
+  }
+
+  // Si le dossier mu-plugins est vide, le supprimer aussi
+  $files = @scandir($muPluginsDir);
+  if ($files && count($files) <= 2) { // . et .. seulement
+    @rmdir($muPluginsDir);
+  }
 }
 
 /**
@@ -182,21 +213,12 @@ function vite_check_server_and_cleanup() {
   }
 
   // Vérifier si Vite répond via une socket TCP directe (plus rapide que file_get_contents)
-  $socket = @fsockopen('localhost', VITE_PORT, $errno, $errstr, 2);
+  // Hôte Vite baké depuis .env (VITE_HOST) — jamais 'localhost' en dur
+  $socket = @fsockopen(VITE_DEV_HOST, VITE_PORT, $errno, $errstr, 2);
 
   if ($socket === false) {
-    // Vite ne répond pas - se supprimer
-    $muPluginFile = __FILE__;
-    $muPluginsDir = dirname($muPluginFile);
-
-    // Supprimer ce fichier
-    @unlink($muPluginFile);
-
-    // Si le dossier mu-plugins est vide, le supprimer aussi
-    $files = @scandir($muPluginsDir);
-    if ($files && count($files) <= 2) { // . et .. seulement
-      @rmdir($muPluginsDir);
-    }
+    // Vite ne répond pas - se supprimer intégralement
+    vite_self_destruct();
 
     // Mettre en cache le résultat
     $lastCheck = $now;
@@ -213,6 +235,19 @@ function vite_check_server_and_cleanup() {
   $lastResult = true;
 
   return true;
+}
+
+// Filet PRODUCTION : ce plugin est un artefact de DEV. S'il atterrit sur un site
+// qui se déclare EXPLICITEMENT en production (WP_ENVIRONMENT_TYPE), ne jamais
+// injecter — même si un service écoute par hasard sur le port Vite côté serveur —
+// et s'auto-supprimer. Le test d'explicitéité est indispensable :
+// wp_get_environment_type() renvoie 'production' PAR DÉFAUT quand rien n'est
+// défini (cas de la plupart des installs locales) — sans lui, le plugin
+// s'auto-détruirait en dev.
+$vite_env_explicit = (defined('WP_ENVIRONMENT_TYPE') && WP_ENVIRONMENT_TYPE) || getenv('WP_ENVIRONMENT_TYPE');
+if ($vite_env_explicit && function_exists('wp_get_environment_type') && wp_get_environment_type() === 'production') {
+  vite_self_destruct();
+  return;
 }
 
 // Vérifier que le thème actuel est bien le thème ciblé

@@ -362,6 +362,13 @@ export const WATCH_PHP = process.env.WATCH_PHP !== 'false';
 export const HMR_BODY_RESET = process.env.HMR_BODY_RESET !== 'false';
 
 /**
+ * Injecte Vite dans l'admin + le canvas iframé Gutenberg (défaut: true)
+ * NOTE: generate-mu-plugin relit .env en live (watcher) — cet export est la
+ * référence pour tout autre consommateur du réglage
+ */
+export const VITE_EDITOR = process.env.VITE_EDITOR !== 'false';
+
+/**
  * Active l'auto-incrément de la version du thème à la fermeture du mode dev (défaut: true)
  */
 export const AUTO_INCREMENT_VERSION = process.env.AUTO_INCREMENT_VERSION !== 'false';
