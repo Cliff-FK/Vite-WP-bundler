@@ -19,8 +19,9 @@ import { resolve } from 'path';
 
 // Filtre les warnings cosmétiques de vite-plugin-sass-glob-import : il warn "Directories don't exist"
 // sur les patterns extglob avec wildcards en début de chemin (ex: `bloc-parts/!(_libs)/**/...`), mais
-// le glob s'exécute correctement et le bundle est bien filtré. Check naïf bugué côté plugin (cf.
-// node_modules/vite-plugin-sass-glob-import/src/index.ts:62). Pas d'option `quiet` exposée.
+// le glob s'exécute correctement et le bundle est bien filtré. Check naïf bugué côté plugin, toujours
+// présent en v6 (cf. node_modules/vite-plugin-sass-glob-import/dist/index.mjs:33-39 : split('*')[0]
+// teste l'existence de `bloc-parts/!(`). Pas d'option `quiet` exposée.
 const _origWarn = console.warn;
 console.warn = function (...args) {
     if (args[0] && typeof args[0] === 'string' && args[0].includes("Sass Glob Import: Directories don't exist")) return;
@@ -372,10 +373,6 @@ export default defineConfig(async ({ command }) => {
 
     // Minification avec esbuild (beaucoup plus rapide que Terser)
     minify: 'esbuild',
-    esbuildOptions: {
-      drop: ['console', 'debugger'], // Supprimer console.log et debugger
-      legalComments: 'none', // Pas de commentaires de licence
-    },
 
     // Sourcemaps en production (désactivé par défaut)
     sourcemap: false,
@@ -383,6 +380,16 @@ export default defineConfig(async ({ command }) => {
     // Taille des chunks
     chunkSizeWarningLimit: 1000,
   },
+
+  // Options esbuild appliquées au BUILD uniquement. L'ancien build.esbuildOptions
+  // n'existe pas dans le schéma Vite (il était silencieusement ignoré : drop console
+  // ne s'appliquait pas). Scopé au build pour préserver les console.log en dev.
+  ...(command === 'build' ? {
+    esbuild: {
+      drop: ['console', 'debugger'],
+      legalComments: 'none',
+    },
+  } : {}),
 
   // Optimisation des dépendances
   optimizeDeps: {
@@ -501,6 +508,10 @@ export default defineConfig(async ({ command }) => {
       console.warn(msg);
     },
     hasWarned: false,
+    // Interface Logger complète : Vite appelle clearScreen() sur le raccourci
+    // clavier « c » du terminal dev — sans ces membres, TypeError
+    clearScreen: () => {},
+    hasErrorLogged: () => false,
   },
 };
 });
