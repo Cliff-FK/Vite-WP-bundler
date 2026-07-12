@@ -14,19 +14,8 @@ import { generateMuPluginPlugin } from './plugins/generate-mu-plugin.js';
 import { copyMinifiedLibsPlugin } from './plugins/copy-minified-libs.plugin.js';
 import { copyStaticAssetsPlugin } from './plugins/copy-static-assets.plugin.js';
 import { serveStaticAssetsPlugin } from './plugins/serve-static-assets.plugin.js';
-import sassGlobImports from 'vite-plugin-sass-glob-import';
+import { sassGlobImports } from './plugins/sass-glob-import.plugin.js';
 import { resolve } from 'path';
-
-// Filtre les warnings cosmétiques de vite-plugin-sass-glob-import : il warn "Directories don't exist"
-// sur les patterns extglob avec wildcards en début de chemin (ex: `bloc-parts/!(_libs)/**/...`), mais
-// le glob s'exécute correctement et le bundle est bien filtré. Check naïf bugué côté plugin, toujours
-// présent en v6 (cf. node_modules/vite-plugin-sass-glob-import/dist/index.mjs:33-39 : split('*')[0]
-// teste l'existence de `bloc-parts/!(`). Pas d'option `quiet` exposée.
-const _origWarn = console.warn;
-console.warn = function (...args) {
-    if (args[0] && typeof args[0] === 'string' && args[0].includes("Sass Glob Import: Directories don't exist")) return;
-    return _origWarn.apply(console, args);
-};
 
 export default defineConfig(async ({ command }) => {
   // console.log('[Vite Config] Command:', command);
@@ -384,6 +373,10 @@ export default defineConfig(async ({ command }) => {
   // Options esbuild appliquées au BUILD uniquement. L'ancien build.esbuildOptions
   // n'existe pas dans le schéma Vite (il était silencieusement ignoré : drop console
   // ne s'appliquait pas). Scopé au build pour préserver les console.log en dev.
+  // PÉRENNITÉ (Vite 8/Rolldown) : ces options ne s'appliquent QUE parce que
+  // build.minify vaut 'esbuild' (esbuild ancré en devDependency, peer optionnelle
+  // de Vite 8). Si minify passe un jour à 'oxc' (défaut v8), drop et legalComments
+  // seraient JETÉS SANS WARNING — les porter alors vers les options oxc/rolldown.
   ...(command === 'build' ? {
     esbuild: {
       drop: ['console', 'debugger'],
@@ -394,12 +387,10 @@ export default defineConfig(async ({ command }) => {
   // Optimisation des dépendances
   optimizeDeps: {
     // Ignorer les warnings de sourcemap manquantes pour les libs minifiées
-    esbuildOptions: {
-      logOverride: {
-        'missing-source-map': 'silent',
-      },
-      logLevel: 'silent',
-    },
+    // NOTE: l'ancien esbuildOptions (logOverride missing-source-map) est retiré :
+    // déprécié sous Vite 8/Rolldown (→ rolldownOptions) et ses clés esbuild n'y
+    // existent pas. Vérifié en dev : aucun bruit de sourcemap ne réapparaît —
+    // ré-ajouter optimizeDeps.rolldownOptions.logLevel si besoin un jour.
     include: [
       // Ajoute ici les dépendances à pré-bundler
       // Exemple : 'unpoly', 'swiper', etc.

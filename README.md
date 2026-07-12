@@ -490,7 +490,7 @@ background: url('../../images/hero.jpg'); /* Relatif depuis optimised/css/ vers 
 
 ### `sass-glob-import.plugin.js`
 
-Support des imports globaux SCSS via `vite-plugin-sass-glob-import`.
+Support des imports globaux SCSS — plugin MAISON (l'ancien `vite-plugin-sass-glob-import` plafonnait à Vite 6/7 et bloquait les majeures ; sémantique répliquée à l'identique, sortie CSS byte-identique vérifiée).
 
 ```scss
 @import "vendors/*.scss";   // Importe tous les .scss du dossier
