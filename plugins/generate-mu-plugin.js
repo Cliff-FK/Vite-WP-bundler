@@ -154,7 +154,7 @@ async function generateMuPluginContent() {
 define('VITE_DEV_MODE', true);
 define('VITE_URL', '${PATHS.viteUrl}');
 define('VITE_PORT', ${PATHS.vitePort});
-define('VITE_DEV_HOST', '${PATHS.viteHost}'); // Hôte du serveur Vite (VITE_HOST depuis .env)
+define('VITE_DEV_HOST', '${['0.0.0.0', '::'].includes(PATHS.viteHost) ? '127.0.0.1' : PATHS.viteHost}'); // Hôte du check socket (VITE_HOST depuis .env ; 0.0.0.0/:: mappés vers 127.0.0.1, fsockopen ne sait pas les joindre)
 define('VITE_TARGET_THEME', '${themeName}'); // Thème ciblé (THEME_NAME depuis .env)
 
 /**
@@ -240,12 +240,12 @@ function vite_check_server_and_cleanup() {
 // Filet PRODUCTION : ce plugin est un artefact de DEV. S'il atterrit sur un site
 // qui se déclare EXPLICITEMENT en production (WP_ENVIRONMENT_TYPE), ne jamais
 // injecter — même si un service écoute par hasard sur le port Vite côté serveur —
-// et s'auto-supprimer. Le test d'explicitéité est indispensable :
-// wp_get_environment_type() renvoie 'production' PAR DÉFAUT quand rien n'est
-// défini (cas de la plupart des installs locales) — sans lui, le plugin
-// s'auto-détruirait en dev.
-$vite_env_explicit = (defined('WP_ENVIRONMENT_TYPE') && WP_ENVIRONMENT_TYPE) || getenv('WP_ENVIRONMENT_TYPE');
-if ($vite_env_explicit && function_exists('wp_get_environment_type') && wp_get_environment_type() === 'production') {
+// et s'auto-supprimer. Comparaison sur la valeur BRUTE, jamais sur
+// wp_get_environment_type() : celle-ci NORMALISE toute valeur inconnue (ex. la
+// typo 'dev') en 'production', ce qui auto-détruirait le plugin en local ; et
+// elle renvoie aussi 'production' par défaut quand rien n'est défini.
+$vite_env_raw = defined('WP_ENVIRONMENT_TYPE') && WP_ENVIRONMENT_TYPE ? WP_ENVIRONMENT_TYPE : getenv('WP_ENVIRONMENT_TYPE');
+if ($vite_env_raw === 'production') {
   vite_self_destruct();
   return;
 }

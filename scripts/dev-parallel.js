@@ -55,6 +55,9 @@ function runExitCleanup() {
  * Ce script lance simplement Vite qui se charge de tout
  */
 
+// Purger les temporaires laissés par un éventuel crash précédent
+cleanStaleTimestamps();
+
 // Démarrer Vite (le plugin generate-mu-plugin.plugin.js génère le MU-plugin automatiquement)
 const viteProcess = spawn('vite', [], {
   cwd: bundlerRoot,
@@ -65,13 +68,13 @@ const viteProcess = spawn('vite', [], {
 // Gérer les erreurs du processus
 viteProcess.on('error', (err) => {
   console.error('Erreur lors du démarrage de Vite:', err);
-  runBuildIfNeeded();
+  runExitCleanup();
   // Laisser Node terminer naturellement
 });
 
 // Gérer la fermeture propre de Vite
 viteProcess.on('exit', (code, signal) => {
-  runBuildIfNeeded();
+  runExitCleanup();
   // Laisser Node terminer naturellement
 });
 
@@ -80,7 +83,7 @@ process.on('SIGINT', () => {
   console.log(''); // Forcer un retour à la ligne propre
   viteProcess.kill('SIGINT');
   setTimeout(() => {
-    runBuildIfNeeded();
+    runExitCleanup();
   }, 250); // Délai pour laisser Vite libérer les fichiers
 });
 
@@ -88,7 +91,7 @@ process.on('SIGINT', () => {
 process.on('SIGTERM', () => {
   viteProcess.kill('SIGTERM');
   setTimeout(() => {
-    runBuildIfNeeded();
+    runExitCleanup();
   }, 250); // Délai pour laisser Vite libérer les fichiers
 });
 
