@@ -25,7 +25,7 @@ npm run dev
 npm run build
 ```
 
-Le bundler détecte automatiquement vos assets depuis `functions.php`, génère un MU-plugin WordPress pour l'injection HMR, crée automatiquement les `.gitignore` nécessaires, et ouvre votre site WordPress dans le navigateur. Le MU-plugin est retiré quand le 'npm run dev' est arrêté (au Ctrl+C, sur le kill processus ou en quittant votre logiciel de code). **Prérequis implicite: Les fichiers .css ou .js devant être écoutés, doivent être enqueue avec les fonctions dédiées de WP (correspond à 99% des cas normalement)**.
+Le bundler détecte automatiquement vos assets depuis `functions.php`, génère un MU-plugin WordPress pour l'injection HMR, crée automatiquement les `.gitignore` nécessaires, et affiche l'URL de votre site WordPress dans le terminal. Le MU-plugin est retiré quand le 'npm run dev' est arrêté (au Ctrl+C, sur le kill processus ou en quittant votre logiciel de code). **Prérequis : Node >= 20.19 (Vite 8), et les fichiers .css ou .js devant être écoutés doivent être enqueue avec les fonctions dédiées de WP (correspond à 99% des cas normalement)**.
 
 ---
 
@@ -76,16 +76,21 @@ vite-WP-bundler-main/
 ├── plugins/                  # Plugins Vite personnalisés
 │   ├── generate-mu-plugin.js              # Génération MU-plugin WordPress
 │   ├── wordpress-assets-detector.plugin.js # Détection assets depuis functions.php
-│   ├── accept-all-hmr.plugin.js           # Injection HMR automatique
+│   ├── accept-all-hmr.plugin.js           # HMR JS custom (handleHotUpdate + event wp:theme-js-update)
 │   ├── php-reload.plugin.js               # Rechargement PHP
 │   ├── port-killer.plugin.js              # Libération port Vite
-│   ├── cleanup-mu-plugin.js        # Nettoyage au shutdown
+│   ├── cleanup-mu-plugin.js               # Fin de build : version thème + retrait MU-plugin
 │   ├── postcss-url-rewrite.plugin.js      # Réécriture URLs CSS
 │   ├── cache-manager.plugin.js            # Cache des assets détectés
-│   └── sass-glob-import.plugin.js         # Support @import "*.scss"
+│   ├── sass-glob-import.plugin.js         # Support @import "*.scss"
+│   ├── copy-static-assets.plugin.js       # Copie des assets statiques (fonts, images, inc) au build
+│   ├── serve-static-assets.plugin.js      # Sert les assets statiques du thème en dev
+│   ├── copy-minified-libs.plugin.js       # Copie des libs déjà minifiées (non bundlées)
+│   └── multisite-detector.plugin.js       # Détection multisite (lecture DB via mysql2)
 └── scripts/
-    ├── dev-parallel.js       # Script de démarrage dev
-    └── hmr-body-reset.js     # Client HMR pour reset DOM
+    ├── dev-parallel.js       # Script de démarrage dev (+ cleanup Ctrl+C/kill/exit)
+    ├── hmr-body-reset.js     # Client HMR pour reset DOM (front)
+    └── hmr-editor-guard.js   # Garde HMR du canvas Gutenberg (absorbe les js-updates)
 ```
 
 ### Workflow
@@ -97,7 +102,7 @@ vite-WP-bundler-main/
    - Génère `wp-content/mu-plugins/vite-dev-mode.php`
    - Génère `wp-content/mu-plugins/.gitignore` (ignore le mu-plugin)
    - Ajoute le dossier de build au `.gitignore` racine WordPress
-   - Ouvre le navigateur WordPress
+   - Affiche l'URL du site WordPress dans le terminal
 3. Le MU-plugin injecte :
    - Client Vite (`@vite/client`)
    - Script HMR Body Reset (si `HMR_BODY_RESET=true`)
@@ -129,6 +134,8 @@ THEME_NAME=themezero           # Nom du thème WordPress à bundler
 WATCH_PHP=true                 # Rechargement auto sur changements PHP
 HMR_BODY_RESET=true           # HMR avec reset DOM (false = HMR natif Vite)
 VITE_EDITOR=true              # Injection Vite en admin + canvas iframé Gutenberg
+AUTO_INCREMENT_VERSION=true   # Incrément de la version du thème (style.css) en fin de build
+BUILD_ON_EXIT=false           # Lance un build automatiquement à l'arrêt du dev (Ctrl+C)
 
 # ===================================================================
 # SERVEURS (auto-détectés par défaut)
@@ -172,7 +179,11 @@ Cela va :
 1. Libérer le port VITE_PORT (par défaut 5173) si occupé
 2. Générer le MU-plugin WordPress
 3. Démarrer le serveur Vite
-4. Ouvrir le navigateur sur votre site WordPress
+4. Afficher l'URL de votre site WordPress dans le terminal
+
+Note : le MU-plugin embarque un filet de sécurité — si `WP_ENVIRONMENT_TYPE` vaut `production`
+côté WordPress, il s'auto-détruit sans rien injecter. Au démarrage, le bundler interroge aussi
+la base MySQL (dépendance `mysql2`) pour détecter un éventuel multisite et le nom du site.
 
 ### HMR - Comportement
 
@@ -278,10 +289,11 @@ Les modules ES du thème non modifiés ne sont PAS réévalués (cache module na
 1. **Baseline au chargement** (avant les modules du thème) :
    - HTML + attributs du fragment principal, attributs du `<body>`, enfants directs du `<body>`
    - Snapshot des clés `window` (pour purger les flags/guards primitifs posés ensuite)
-   - Scripts JS Vite sources, registre des modules du thème (auto-inscrits via `accept-all-hmr`)
+   - Scripts JS Vite sources ; le registre des modules du thème est calculé CÔTÉ SERVEUR
+     (module graph Vite, plugin `accept-all-hmr`) et transmis dans l'événement custom
 
 2. **Détection HMR** :
-   - Écoute `vite:beforeUpdate`
+   - Écoute l'événement custom `wp:theme-js-update` (émis par `accept-all-hmr` via `handleHotUpdate`)
    - Déclenche le reset pour les updates `.js` du thème (pas `.scss`, `.css`, ni `hmr-body-reset.js` — l'édition de ce dernier exige un reload manuel)
    - Garde de ré-entrance : deux saves rapprochés sont sérialisés (jamais deux resets entremêlés)
 
@@ -421,20 +433,17 @@ Utilise `cache-manager.plugin.js` pour éviter de re-parser `functions.php` à c
 
 ### `accept-all-hmr.plugin.js`
 
-Injecte automatiquement `import.meta.hot.accept()` dans tous les modules JS du thème.
+Prend en charge les js-updates du thème via l'API serveur documentée de Vite — **aucune injection
+dans les modules** (l'ancienne approche « transform + `import.meta.hot.accept()` injecté dans
+chaque module » a été remplacée).
 
-**Objectif** :
-Empêcher Vite de faire un full-reload quand un module ne définit pas `import.meta.hot.accept()`.
-
-**Injection** :
-```js
-// Injecté automatiquement dans chaque .js du thème
-if (import.meta.hot) {
-  import.meta.hot.accept(() => {
-    // Le script hmr-body-reset.js intercepte le changement
-  });
-}
-```
+**Fonctionnement** :
+- `handleHotUpdate` intercepte tout changement `.js` du thème, invalide les modules concernés
+  et retourne `[]` (supprime le js-update natif → jamais de full-reload subi)
+- Émet l'événement custom `wp:theme-js-update` avec le registre des modules du thème,
+  calculé côté serveur depuis le module graph
+- Côté client, `hmr-body-reset.js` (front) consomme l'événement et déclenche le reset ;
+  `hmr-editor-guard.js` (canvas Gutenberg) l'absorbe et invite à recharger l'éditeur
 
 **Condition** :
 Actif uniquement si `HMR_BODY_RESET=true` dans `.env`.
@@ -444,7 +453,7 @@ Actif uniquement si `HMR_BODY_RESET=true` dans `.env`.
 Surveille les fichiers PHP et déclenche un rechargement complet du navigateur.
 
 **Debounce intelligent** :
-- Groupe les changements PHP en 150ms
+- Groupe les changements PHP en 400ms (`DEBOUNCE_DELAY`)
 - Évite les reloads multiples lors de sauvegardes multiples
 
 **Watch** :
@@ -462,22 +471,22 @@ Libère automatiquement le port Vite (5173) au démarrage si occupé.
 
 ### `cleanup-mu-plugin.js`
 
-Nettoie le MU-plugin WordPress lors de l'arrêt du serveur Vite (Ctrl+C).
-
-**Cleanup** :
-- Supprime `wp-content/mu-plugins/vite-dev-mode.php`
-- Supprime `wp-content/mu-plugins/.gitignore`
-- Supprime le dossier `mu-plugins/` si vide
+Plugin de **fin de build uniquement** (`closeBundle`, enregistré seulement en `command === 'build'`) :
 - Incrémente la version du thème dans `style.css` (si `AUTO_INCREMENT_VERSION=true`)
+- Supprime le MU-plugin dev s'il traîne
 
-**Signaux** :
+Le nettoyage à l'**arrêt du dev** (Ctrl+C, kill, fermeture) vit dans `scripts/dev-parallel.js` :
+
+**Signaux gérés par `dev-parallel.js`** :
 - `SIGINT` (Ctrl+C)
 - `SIGTERM` (kill)
 - `exit` (fermeture normale)
 
-**Gestion d'erreurs** :
-- Ignore silencieusement les fichiers verrouillés par PHP/WordPress
-- Garantit un code de sortie propre même en cas d'erreur
+**Cleanup à l'arrêt du dev** :
+- Supprime `wp-content/mu-plugins/vite-dev-mode.php`
+- Supprime `wp-content/mu-plugins/.gitignore`
+- Supprime le dossier `mu-plugins/` si vide
+- Ignore silencieusement les fichiers verrouillés par PHP/WordPress, code de sortie propre
 
 ### `postcss-url-rewrite.plugin.js`
 
@@ -555,7 +564,7 @@ Le plugin `generate-mu-plugin.js` recharge `.env` au démarrage du serveur.
 **Vérifications** :
 1. `functions.php` : Les assets sont bien enregistrés avec `wp_enqueue_style()` / `wp_enqueue_script()`
 2. Chemins absolus : Utiliser `get_template_directory_uri()` (pas de chemins hardcodés)
-3. Cache : Supprimer `vite-WP-bundler-main/cache/` et rebuild
+3. Cache : Supprimer `.cache/` (et au besoin `node_modules/.vite`) puis rebuild
 
 **Debug** :
 ```bash
