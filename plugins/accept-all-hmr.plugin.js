@@ -59,6 +59,9 @@ export function acceptAllHMRPlugin() {
       }
 
       // Injecter import.meta.hot.accept() à la fin du fichier
+      // + auto-inscription au registre des modules du thème (sans query pour dédupliquer) :
+      // hmr-body-reset.js ré-importe ces modules avec cache-bust à chaque reset pour
+      // re-exécuter leurs effets de bord top-level (listeners au scope module).
       const injectedCode = `${code}
 
 // Auto-injected by accept-all-hmr plugin
@@ -66,6 +69,7 @@ if (import.meta.hot) {
   import.meta.hot.accept(() => {
     // HMR accepté - la logique de reset est gérée par hmr-body-reset.js
   });
+  (window.__WP_HMR_MODULES__ = window.__WP_HMR_MODULES__ || new Set()).add(import.meta.url.split('?')[0]);
 }
 `;
 

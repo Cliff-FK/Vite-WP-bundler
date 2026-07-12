@@ -116,11 +116,13 @@ async function generateMuPluginContent() {
   const envPath = resolve(PATHS.bundlerRoot, '.env');
   let themeName = PATHS.themeName; // Valeur par défaut
   let HMR_BODY_RESET = true;
+  let VITE_EDITOR = true;
 
   if (existsSync(envPath)) {
     const envConfig = dotenv.parse(readFileSync(envPath, 'utf8'));
     themeName = envConfig.THEME_NAME || PATHS.themeName;
     HMR_BODY_RESET = envConfig.HMR_BODY_RESET !== 'false';
+    VITE_EDITOR = envConfig.VITE_EDITOR !== 'false';
   }
 
   // Détecter les assets depuis WordPress
@@ -458,8 +460,7 @@ function vite_inject_front_debug() {
 }
 
 /**
- * Injecter les assets Vite dans le <head> - FRONT uniquement
- * L'admin WordPress (y compris l'éditeur Gutenberg) utilise les assets de build normaux
+ * Injecter les assets Vite dans le <head> - FRONT
  */
 // Priorité 20 (APRÈS l'import map WP, imprimée sur wp_head en priorité 10). La spec HTML impose qu'une
 // import map précède TOUT <script type="module"> : injecter @vite/client (module) en priorité 1 la plaçait
@@ -467,6 +468,208 @@ function vite_inject_front_debug() {
 // plus → les blocs core interactifs (ex. core/navigation : clic burger) restaient morts en dev uniquement.
 add_action('wp_head', 'vite_inject_front_assets', 20);
 add_action('wp_head', 'vite_inject_front_debug', 20);
+
+// ============================================================
+// VITE EDITOR : injection dev en admin + canvas iframé Gutenberg
+// Désactivable via VITE_EDITOR=false dans le .env du bundler
+// ============================================================
+define('VITE_EDITOR', ${VITE_EDITOR ? 'true' : 'false'});
+
+if (VITE_EDITOR) {
+
+/**
+ * Fragment d'URL identifiant les assets de build DU thème ciblé
+ * (toujours scopé thème + dossier : un '/dist/' nu matcherait les assets d'autres plugins)
+ */
+function vite_build_url_fragment() {
+  global \$vite_build_folder;
+  return '/' . get_template() . '/' . trim(\$vite_build_folder, '/') . '/';
+}
+
+/**
+ * Retrouve la source Vite correspondant à un asset de build (par nom de base)
+ * Ex: .../dist/js/main.min.js → sources/js/main.js
+ */
+function vite_source_for_build_src(\$src) {
+  global \$vite_front_sources, \$vite_admin_sources, \$vite_editor_sources;
+  \$base = basename(parse_url(\$src, PHP_URL_PATH));
+  \$isJs = (bool) preg_match('/\\.js$/', \$base);
+  \$baseNoExt = preg_replace('/\\.min\\.(js|css)$/', '', \$base);
+  if (\$baseNoExt === \$base) \$baseNoExt = preg_replace('/\\.(js|css)$/', '', \$base);
+  foreach (array_unique(array_merge(\$vite_front_sources, \$vite_admin_sources, \$vite_editor_sources)) as \$s) {
+    // Type respecté : un .js de build ne mappe qu'une source .js, un .css qu'une source .scss/.css
+    if (((bool) preg_match('/\\.js$/', \$s)) !== \$isJs) continue;
+    if (preg_replace('/\\.(js|scss|css)$/', '', basename(\$s)) === \$baseNoExt) return \$s;
+  }
+  return null;
+}
+
+/**
+ * Balise du garde HMR éditeur : conserve le HMR CSS mais bloque les js-updates
+ * (sans lui, accept-all-hmr ferait réévaluer les modules dans l'éditeur à chaque
+ * save JS, sans reset : les abonnements wp.data.subscribe / acf.addAction
+ * s'empileraient à chaque édition)
+ */
+function vite_editor_guard_tag() {
+  \$guardPath = '${PATHS.bundlerRoot.replace(/\\/g, '/')}/scripts/hmr-editor-guard.js';
+  if (!file_exists(\$guardPath)) return '';
+  return '<script type="module" src="' . esc_url(VITE_URL . '/@fs/' . \$guardPath) . '"></script>';
+}
+
+/**
+ * Construit la balise Vite (<script module> ou <link>) d'une source du thème
+ */
+function vite_asset_tag(\$sourcePath) {
+  \$themePath = str_replace('\\\\', '/', get_template_directory());
+  \$viteUrl = VITE_URL . '/@fs/' . \$themePath . '/' . \$sourcePath;
+  if (preg_match('/\\.js$/', \$sourcePath)) {
+    return '<script type="module" src="' . esc_url(\$viteUrl) . '"></script>';
+  }
+  if (preg_match('/\\.(scss|css)$/', \$sourcePath)) {
+    return '<link rel="stylesheet" href="' . esc_url(\$viteUrl) . '">';
+  }
+  return '';
+}
+
+/**
+ * Canvas iframé Gutenberg + previews de blocs : remplacer les assets de build
+ * par les sources Vite dans les assets résolus injectés dans l'iframe.
+ * Sans effet si l'éditeur n'est pas iframé (metaboxes legacy) : assets de build inchangés.
+ */
+add_filter('block_editor_settings_all', function(\$settings) {
+  if (!vite_is_target_theme() || !vite_check_server_and_cleanup()) return \$settings;
+  if (empty(\$settings['__unstableResolvedAssets'])) return \$settings;
+
+  global \$vite_editor_sources;
+  \$assets = \$settings['__unstableResolvedAssets'];
+  \$styles = isset(\$assets['styles']) ? \$assets['styles'] : '';
+  \$scripts = isset(\$assets['scripts']) ? \$assets['scripts'] : '';
+  \$buildFragment = preg_quote(vite_build_url_fragment(), '/');
+
+  // Retirer les assets de build du thème (remplacés par les sources)
+  \$styles = preg_replace('/<link[^>]*' . \$buildFragment . '[^>]*\\.css[^>]*>/i', '<!-- Vite Editor: CSS build retiré -->', \$styles);
+  \$scripts = preg_replace('/<script[^>]*' . \$buildFragment . '[^>]*\\.js[^>]*>\\s*<\\/script>/is', '<!-- Vite Editor: JS build retiré -->', \$scripts);
+
+  // Client Vite + garde HMR éditeur en tête des scripts ; styles sources en FIN (gagnent la cascade)
+  \$injectScripts = '<script type="module" src="' . VITE_URL . '/@vite/client"></script>' . vite_editor_guard_tag();
+  \$injectStyles = '';
+  foreach (\$vite_editor_sources as \$sourcePath) {
+    \$tag = vite_asset_tag(\$sourcePath);
+    if (strpos(\$tag, '<script') === 0) { \$injectScripts .= \$tag; } else { \$injectStyles .= \$tag; }
+  }
+
+  \$assets['scripts'] = \$injectScripts . \$scripts;
+  \$assets['styles'] = \$styles . \$injectStyles;
+  \$settings['__unstableResolvedAssets'] = \$assets;
+
+  // Traiter aussi le CSS add_editor_style du build : WordPress l'inline dans
+  // \$settings['styles'] préfixé .editor-styles-wrapper (spécificité supérieure),
+  // il écraserait les éditions live du <link> source injecté ci-dessus.
+  // Les entrées n'ont PAS de baseURL fiable (contenu inliné brut) : on matche
+  // par CONTENU contre les CSS réels du dossier de build (md5, secours préfixe
+  // complet de 500 chars). L'entrée matchée est REMPLACÉE par un @import vers la
+  // source Vite (jamais retirée) : en éditeur NON iframé, le canvas = document
+  // parent ne consomme QUE \$settings['styles'] — un retrait le laisserait nu.
+  // En iframé, doublon bénin avec le <link> injecté ci-dessus (même URL, mêmes règles).
+  if (!empty(\$settings['styles']) && is_array(\$settings['styles'])) {
+    global \$vite_build_folder;
+    \$buildFragmentRaw = vite_build_url_fragment();
+    \$buildDir = get_template_directory() . '/' . trim(\$vite_build_folder, '/');
+    \$themePathStyles = str_replace('\\\\', '/', get_template_directory());
+    \$buildCss = [];
+    foreach (array_merge(glob(\$buildDir . '/*.css') ?: [], glob(\$buildDir . '/css/*.css') ?: []) as \$cssFile) {
+      \$content = file_get_contents(\$cssFile);
+      if (\$content !== false && \$content !== '') {
+        \$buildCss[] = ['md5' => md5(\$content), 'prefix' => substr(\$content, 0, 500), 'file' => basename(\$cssFile)];
+      }
+    }
+    foreach (\$settings['styles'] as \$idx => \$entry) {
+      \$matchedFile = null;
+      if (isset(\$entry['baseURL']) && strpos(\$entry['baseURL'], \$buildFragmentRaw) !== false) {
+        \$matchedFile = basename(parse_url(\$entry['baseURL'], PHP_URL_PATH));
+      } elseif (!empty(\$entry['css'])) {
+        \$entryMd5 = md5(\$entry['css']);
+        foreach (\$buildCss as \$candidate) {
+          if (\$entryMd5 === \$candidate['md5'] ||
+              (strlen(\$candidate['prefix']) === 500 && strncmp(\$entry['css'], \$candidate['prefix'], 500) === 0)) {
+            \$matchedFile = \$candidate['file'];
+            break;
+          }
+        }
+      }
+      if (\$matchedFile === null) continue;
+
+      \$sourcePath = vite_source_for_build_src(\$matchedFile);
+      if (\$sourcePath) {
+        \$settings['styles'][\$idx]['css'] = '@import url("' . VITE_URL . '/@fs/' . \$themePathStyles . '/' . \$sourcePath . '");';
+        unset(\$settings['styles'][\$idx]['baseURL']); // Plus de base locale : l'import est absolu
+      }
+      // Pas de source détectée : entrée laissée telle quelle (style stale mais canvas jamais nu)
+    }
+    \$settings['styles'] = array_values(\$settings['styles']);
+  }
+
+  return \$settings;
+}, 99999);
+
+/**
+ * Pages admin (y compris la page parente de l'éditeur) : dequeue les assets de
+ * build du thème et mémoriser la source équivalente de chacun pour l'injection.
+ * Parité stricte : on n'injecte QUE ce qui a été retiré (pas de style front en admin).
+ */
+function vite_dequeue_build_assets_admin() {
+  if (!vite_is_target_theme() || !vite_check_server_and_cleanup()) return;
+  global \$wp_styles, \$wp_scripts;
+  \$buildFragment = vite_build_url_fragment();
+  \$found = [];
+  \$unmapped = [];
+
+  if (!empty(\$wp_styles->registered)) {
+    foreach (\$wp_styles->registered as \$handle => \$style) {
+      if (!empty(\$style->src) && strpos(\$style->src, \$buildFragment) !== false) {
+        \$src = vite_source_for_build_src(\$style->src);
+        if (\$src) { \$found[] = \$src; } else { \$unmapped[] = basename(\$style->src); }
+        wp_dequeue_style(\$handle);
+        wp_deregister_style(\$handle);
+      }
+    }
+  }
+  if (!empty(\$wp_scripts->registered)) {
+    foreach (\$wp_scripts->registered as \$handle => \$script) {
+      if (!empty(\$script->src) && strpos(\$script->src, \$buildFragment) !== false) {
+        \$src = vite_source_for_build_src(\$script->src);
+        if (\$src) { \$found[] = \$src; } else { \$unmapped[] = basename(\$script->src); }
+        wp_dequeue_script(\$handle);
+        wp_deregister_script(\$handle);
+      }
+    }
+  }
+  \$GLOBALS['vite_admin_replacements'] = array_unique(\$found);
+  \$GLOBALS['vite_admin_unmapped'] = array_unique(\$unmapped);
+}
+add_action('admin_enqueue_scripts', 'vite_dequeue_build_assets_admin', 9999);
+
+function vite_inject_admin_assets() {
+  if (!vite_is_target_theme() || !vite_check_server_and_cleanup()) return;
+  \$sources = isset(\$GLOBALS['vite_admin_replacements']) ? \$GLOBALS['vite_admin_replacements'] : [];
+  \$unmapped = isset(\$GLOBALS['vite_admin_unmapped']) ? \$GLOBALS['vite_admin_unmapped'] : [];
+
+  // Échouer visiblement : un asset dequeué sans source détectée doit se voir
+  if (!empty(\$unmapped)) {
+    echo '<!-- Vite Dev Mode [admin] ATTENTION : ' . count(\$unmapped) . ' asset(s) de build dequeué(s) SANS source détectée : ' . esc_html(implode(', ', \$unmapped)) . ' -->' . "\\n";
+  }
+  if (empty(\$sources)) return; // Rien à remplacer : ne pas injecter le client pour rien
+
+  echo '<script type="module" src="' . VITE_URL . '/@vite/client"></script>' . "\\n";
+  echo vite_editor_guard_tag() . "\\n";
+  foreach (\$sources as \$sourcePath) {
+    echo vite_asset_tag(\$sourcePath) . "\\n";
+  }
+  echo '<!-- Vite Dev Mode actif [admin] (' . count(\$sources) . ' assets remplacés) -->' . "\\n";
+}
+add_action('admin_head', 'vite_inject_admin_assets', 1);
+
+} // if (VITE_EDITOR)
 `;
 }
 

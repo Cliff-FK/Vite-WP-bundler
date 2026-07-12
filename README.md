@@ -128,6 +128,7 @@ THEME_NAME=themezero           # Nom du thème WordPress à bundler
 # ===================================================================
 WATCH_PHP=true                 # Rechargement auto sur changements PHP
 HMR_BODY_RESET=true           # HMR avec reset DOM (false = HMR natif Vite)
+VITE_EDITOR=true              # Injection Vite en admin + canvas iframé Gutenberg
 
 # ===================================================================
 # SERVEURS (auto-détectés par défaut)
@@ -255,35 +256,38 @@ import Swiper from '../../js/_libs/swiper.min.js'; // Chemin relatif préservé
 
 Script client (`scripts/hmr-body-reset.js`) injecté automatiquement quand `HMR_BODY_RESET=true`.
 
+#### Principe clé : identité des nœuds préservée
+
+Les modules ES du thème non modifiés ne sont PAS réévalués (cache module navigateur). Toute référence DOM figée au scope module (ex: `export const bodyDOM = document.querySelector(...)`) pointerait vers un nœud détaché si on remplaçait les nœuds. Le reset restaure donc le HTML DU fragment principal (`[up-main]`, sinon `<main>`, sinon `<body>` en mode dégradé) SANS jamais remplacer les nœuds pérennes : body, header, footer, main gardent leur identité.
+
 #### Fonctionnement
 
-1. **Sauvegarde initiale** :
-   - HTML du `<body>`
-   - Scripts JS Vite sources
-   - Position du scroll
+1. **Baseline au chargement** (avant les modules du thème) :
+   - HTML + attributs du fragment principal, attributs du `<body>`, enfants directs du `<body>`
+   - Snapshot des clés `window` (pour purger les flags/guards primitifs posés ensuite)
+   - Scripts JS Vite sources, registre des modules du thème (auto-inscrits via `accept-all-hmr`)
 
 2. **Détection HMR** :
    - Écoute `vite:beforeUpdate`
-   - Filtre uniquement les updates `.js` (pas `.scss`, `.css`, ou `hmr-body-reset.js`)
+   - Déclenche le reset pour les updates `.js` du thème (pas `.scss`, `.css`, ni `hmr-body-reset.js` — l'édition de ce dernier exige un reload manuel)
+   - Garde de ré-entrance : deux saves rapprochés sont sérialisés (jamais deux resets entremêlés)
 
-3. **Reset DOM** :
-   - Re-init le HTMl du `<body>` (supprime tous les event listeners)
-   - Réinjecte les scripts JS avec cache-bust (`?t=timestamp`)
-   - Le/les scripts réinjectés à pour conséquence de relancer tout type de js.
-   - Restaure la position du scroll
+3. **Reset** :
+   - Nettoie les event listeners trackés (tous nœuds, `window`, `document`) et les handlers `up.on` (Unpoly)
+   - Purge les globals PRIMITIFS apparus depuis le baseline (guards type `window.xxxInit`) ; fonctions/objets préservés (libs UMD : Masonry, Unpoly...)
+   - Retire les enfants directs du `<body>` ajoutés par le JS (ex: modales déplacées)
+   - Restaure attributs + HTML du fragment, ré-exécute ses `<script>` embarqués
+   - Réinjecte les entrées JS avec cache-bust (`?t=timestamp`) et ré-importe chaque module du registre (re-exécute leurs effets de bord top-level)
+   - Émet `up:fragment:inserted` (Unpoly présent) ou un `DOMContentLoaded` synthétique, puis restaure le scroll
 
-#### Event Listeners
+#### Limites connues
 
-Pour les éventuels events/timer js hors body, Le script tracke automatiquement les listeners `window` et `document` :
-
-```js
-// Avant HMR
-window.addEventListener('scroll', handler);
-document.addEventListener('click', handler);
-
-// Après HMR → Listeners nettoyés automatiquement
-// Le js se réexécute et réattache de nouveaux listeners propres
-```
+- Thème sans `<main>` ni `[up-main]` : fallback body en mode dégradé (les références module-scope vers header/footer redeviennent périmées après reset).
+- Scripts enregistrés via `block.json` (hors graphe Vite) : non couverts par le HMR, reload manuel.
+- Scripts inline du fragment pilotés par `DOMContentLoaded` : ré-exécutés au reset mais leur listener ne tire pas sur les pages Unpoly (c'est `up:fragment:inserted` qui est émis). Écouter les deux événements côté script si besoin.
+- Les scripts inline classiques sont ré-exécutés dans une IIFE : un `var`/`function` destiné à un autre script inline doit passer par `window.x`.
+- `setInterval`/`MutationObserver`/`ResizeObserver` créés par le thème sans guard ni destroy : non nettoyés (s'empilent à chaque reset, comme à chaque navigation Unpoly).
+- Session dev très longue : chaque reset ré-importe les modules du thème sous une URL `?t=` unique (module map navigateur non libérable) — mémoire croissante, un reload de page remet à zéro.
 
 #### Désactivation
 
@@ -376,9 +380,10 @@ Génère le MU-plugin WordPress à chaque démarrage du serveur Vite.
 - Ouvre le navigateur WordPress
 
 **MU-Plugin généré** :
-- Dequeue les assets de build (front + editor)
+- Dequeue les assets de build (front, admin, canvas éditeur), toujours scopés `{thème}/{dossier-build}/` (jamais un nom de dossier nu, pour ne pas toucher aux assets d'autres plugins)
 - Injecte les assets Vite (client HMR + sources JS/SCSS)
-- Conditionnel : `hmr-body-reset.js` si `HMR_BODY_RESET=true`
+- `VITE_EDITOR=true` : injecte aussi le client + les sources dans le canvas iframé Gutenberg et les previews de blocs (via `block_editor_settings_all` / `__unstableResolvedAssets`), retire le CSS `add_editor_style` du build (matching par contenu, sinon sa copie inlinée `.editor-styles-wrapper` écraserait les éditions live), et remplace en admin chaque asset de build dequeué par sa source (parité stricte : rien n'est injecté qui n'ait été retiré)
+- Conditionnel : `hmr-body-reset.js` si `HMR_BODY_RESET=true` (front uniquement ; dans le canvas, le HMR CSS est natif et un édit JS est absorbé sans re-init, recharger l'éditeur pour le JS)
 - Auto-destruction : Se supprime automatiquement si Vite est down
 
 ### `wordpress-assets-detector.plugin.js`
