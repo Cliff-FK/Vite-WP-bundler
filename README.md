@@ -184,6 +184,19 @@ Cela va :
 - **JS modifié** → Rechargement complet de la page (HMR natif Vite, sur un WP basique cela choisira très souvent un full reload)
 - **SCSS/CSS modifié** → HMR CSS natif Vite quasi instantané
 
+#### Dans l'éditeur Gutenberg (`VITE_EDITOR=true`)
+- **SCSS/CSS modifié** → HMR CSS natif **aussi dans le canvas iframé de Gutenberg** : le MU-plugin
+  remplace les assets de build du canvas (`block_editor_settings_all` → `__unstableResolvedAssets`)
+  par `@vite/client` + les sources, et transforme les entrées `add_editor_style` inlinées en
+  `@import` vers Vite. La modification s'applique en place, sans recharger l'éditeur
+  (validé par sonde : règle visible dans le canvas ~250 ms après l'enregistrement du fichier).
+- **JS modifié** → pas de hot-swap dans l'éditeur, **par design** : la garde
+  (`scripts/hmr-editor-guard.js`) absorbe les js-updates et affiche un avertissement console
+  invitant à recharger l'éditeur (ré-exécuter le JS du thème dans le canvas provoquerait des
+  doubles inits de listeners/widgets).
+- Rappel : une session d'éditeur ouverte **avant** le démarrage de `npm run dev` a chargé les
+  assets de build et ne reçoit aucun update — recharger l'onglet une fois (F5) après le démarrage.
+
 ### Commandes
 
 ```bash
