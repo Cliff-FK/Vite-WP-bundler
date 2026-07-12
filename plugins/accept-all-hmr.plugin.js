@@ -1,11 +1,19 @@
 /**
- * Plugin Vite pour accepter automatiquement le HMR sur TOUS les modules JS du thème
+ * Plugin Vite : intercepteur HMR des modules JS du thème (API documentée)
  *
- * Objectif: Empêcher Vite de faire un full-reload quand un module ne définit pas import.meta.hot.accept()
- * Solution: Injecter automatiquement import.meta.hot.accept() dans tous les fichiers JS du thème
+ * Remplace l'ancienne approche « transform + import.meta.hot.accept() injecté
+ * dans chaque module + mutation du payload côté client dans vite:beforeUpdate »
+ * (pattern non documenté) par le mécanisme officiel Vite :
+ * handleHotUpdate invalide les modules (isHmr=true, les chaînes d'imports
+ * recevront ?t= et serviront le code frais), envoie un événement custom
+ * 'wp:theme-js-update' aux clients, et retourne [] pour suspendre la
+ * propagation HMR par défaut.
  *
- * Ainsi, le script HMR du bundler peut intercepter les changements via vite:beforeUpdate
- * au lieu que Vite décide de faire un reload complet
+ * Consommateurs de l'événement :
+ * - scripts/hmr-body-reset.js (front) : reset du fragment + réinjection
+ * - scripts/hmr-editor-guard.js (admin + canvas Gutenberg) : avertissement
+ *
+ * Les CSS/SCSS ne sont PAS interceptés : HMR CSS natif Vite intact.
  */
 
 import { PATHS } from '../paths.config.js';
@@ -14,7 +22,7 @@ import { resolve } from 'path';
 import dotenv from 'dotenv';
 
 /**
- * Recharge HMR_BODY_RESET depuis .env
+ * Recharge HMR_BODY_RESET depuis .env (pris en compte sans redémarrer Vite)
  */
 function isHMRBodyResetEnabled() {
   const envPath = resolve(PATHS.bundlerRoot, '.env');
@@ -26,57 +34,64 @@ function isHMRBodyResetEnabled() {
   return envConfig.HMR_BODY_RESET !== 'false';
 }
 
+// Racine du bundler normalisée : ses propres scripts (hmr-body-reset,
+// hmr-editor-guard) ne sont JAMAIS des « JS du thème », même si le bundler
+// est installé DANS le dossier du thème (installation portable)
+const BUNDLER_ROOT = String(PATHS.bundlerRoot).replace(/\\/g, '/');
+
+/**
+ * Un fichier est un module JS SOURCE du thème (pas une lib minifiée,
+ * pas un script du bundler)
+ */
+function isThemeJs(filePath) {
+  const f = String(filePath).replace(/\\/g, '/');
+  if (f.includes(BUNDLER_ROOT)) return false;
+  return f.includes('/themes/') && f.endsWith('.js') && !f.endsWith('.min.js');
+}
+
 export function acceptAllHMRPlugin() {
   return {
     name: 'accept-all-hmr',
-    enforce: 'post', // Appliquer après les autres transformations
 
-    transform(code, id) {
-      // Vérifier si HMR_BODY_RESET est activé dans .env
-      // Si désactivé, on ne transforme rien et Vite fera un full reload natif
-      if (!isHMRBodyResetEnabled()) {
-        return null;
+    handleHotUpdate({ server, modules, timestamp, file }) {
+      // HMR_BODY_RESET=false → comportement Vite natif (full reload sur JS)
+      if (!isHMRBodyResetEnabled()) return;
+      // CSS/SCSS, libs minifiées, fichiers hors thème → HMR natif
+      if (!isThemeJs(file)) return;
+      // Fichier hors module graph (JS du thème jamais importé par la page) :
+      // ne pas déclencher un reset pour un fichier qu'elle ne charge pas
+      if (!modules || modules.length === 0) return;
+
+      // Invalider les modules avec isHmr=true (pattern documenté par Vite) :
+      // les imports réécrits des entrées recevront ?t= → code frais garanti
+      const invalidatedModules = new Set();
+      for (const mod of modules) {
+        server.moduleGraph.invalidateModule(mod, invalidatedModules, timestamp, true);
       }
 
-      // Accepter le HMR uniquement pour les fichiers JS du thème (non minifiés)
-      // Critères:
-      // - Dans /themes/ (donc pas node_modules, ni bundler s'il est hors themes)
-      // - Fichier .js mais pas .min.js (donc pas de libs minifiées)
-      // - Pas dans le dossier du bundler (pour les scripts HMR du bundler)
-      const isThemeJS =
-        id.includes('/themes/') &&
-        !id.includes(PATHS.bundlerRoot) &&
-        !id.endsWith('.min.js') &&
-        id.endsWith('.js');
-
-      if (!isThemeJS) {
-        return null; // Ne pas transformer
+      // Liste des modules JS du thème connus du graphe (URLs racine-Vite) :
+      // les clients les ré-importent au reset pour rejouer leurs effets
+      // top-level (remplace l'ancien registre client auto-inscrit)
+      const moduleUrls = new Set();
+      for (const [url, mod] of server.moduleGraph.urlToModuleMap) {
+        if (mod.file && isThemeJs(mod.file) && !url.includes('/_libs/')) {
+          moduleUrls.add(url.split('?')[0]);
+        }
       }
 
-      // Si le fichier contient déjà import.meta.hot, ne rien faire
-      if (code.includes('import.meta.hot')) {
-        return null;
-      }
+      server.ws.send({
+        type: 'custom',
+        event: 'wp:theme-js-update',
+        data: {
+          file: String(file).replace(/\\/g, '/'),
+          paths: modules.map(m => (m.url ? m.url.split('?')[0] : '')).filter(Boolean),
+          moduleUrls: [...moduleUrls],
+          timestamp,
+        },
+      });
 
-      // Injecter import.meta.hot.accept() à la fin du fichier
-      // + auto-inscription au registre des modules du thème (sans query pour dédupliquer) :
-      // hmr-body-reset.js ré-importe ces modules avec cache-bust à chaque reset pour
-      // re-exécuter leurs effets de bord top-level (listeners au scope module).
-      const injectedCode = `${code}
-
-// Auto-injected by accept-all-hmr plugin
-if (import.meta.hot) {
-  import.meta.hot.accept(() => {
-    // HMR accepté - la logique de reset est gérée par hmr-body-reset.js
-  });
-  (window.__WP_HMR_MODULES__ = window.__WP_HMR_MODULES__ || new Set()).add(import.meta.url.split('?')[0]);
-}
-`;
-
-      return {
-        code: injectedCode,
-        map: null, // Pas de sourcemap pour cette injection
-      };
+      // Suspendre la propagation HMR par défaut pour ces modules
+      return [];
     },
   };
 }

@@ -288,6 +288,7 @@ Les modules ES du thème non modifiés ne sont PAS réévalués (cache module na
 - Les scripts inline classiques sont ré-exécutés dans une IIFE : un `var`/`function` destiné à un autre script inline doit passer par `window.x`.
 - `setInterval`/`MutationObserver`/`ResizeObserver` créés par le thème sans guard ni destroy : non nettoyés (s'empilent à chaque reset, comme à chaque navigation Unpoly).
 - Session dev très longue : chaque reset ré-importe les modules du thème sous une URL `?t=` unique (module map navigateur non libérable) — mémoire croissante, un reload de page remet à zéro.
+- Cohérence de config : avec `HMR_BODY_RESET=true`, les js-updates du thème sont suspendus côté serveur (l'événement custom les remplace) ; si `hmr-body-reset.js` n'est pas injecté sur une page (fichier absent, page hors `wp_head`), un édit JS n'y produit ni reset ni reload — recharger manuellement.
 
 #### Désactivation
 

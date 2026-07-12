@@ -34,11 +34,18 @@
   // Mode debug (mettre à true pour activer les logs détaillés)
   const DEBUG = true;
 
-  // Registre des modules JS du thème (auto-inscription injectée par accept-all-hmr.plugin.js).
-  // Permet de RÉ-IMPORTER chaque module avec cache-bust au reset, pour re-exécuter leurs
-  // effets de bord top-level (ex: un addEventListener au scope module) que le nettoyage
-  // des listeners a retirés et que le cache ES module ne rejouerait jamais sinon.
-  window.__WP_HMR_MODULES__ = window.__WP_HMR_MODULES__ || new Set();
+  // Origine du serveur Vite (déduite de notre propre URL de module) : les URLs
+  // de modules envoyées par le serveur sont relatives à la racine Vite
+  const VITE_ORIGIN = new URL(import.meta.url).origin;
+
+  // Liste des modules JS du thème, fournie par le serveur dans chaque événement
+  // wp:theme-js-update (calculée depuis le module graph). Ré-importés avec
+  // cache-bust au reset pour re-exécuter leurs effets de bord top-level
+  // (ex: un addEventListener au scope module) que le nettoyage des listeners a
+  // retirés et que le cache ES module ne rejouerait jamais sinon.
+  // Vide tant qu'aucun événement n'est arrivé (un __VITE_HMR_RESET__() manuel
+  // avant le premier update resette sans ré-imports top-level).
+  let lastModuleUrls = [];
 
   /*------------------------------------*/
   // BASELINE — capturé à l'évaluation de ce module, c'est-à-dire APRÈS tous les
@@ -196,11 +203,13 @@
     });
   }
 
-  // Garde de ré-entrance : deux saves rapprochés déclenchent deux vite:beforeUpdate ;
+  // Garde de ré-entrance : deux saves rapprochés déclenchent deux événements ;
   // sans garde, les deux réinjections s'entremêlent (scripts ?t=T1 ET ?t=T2 évalués
   // → double init du thème). On sérialise : un reset en vol, au plus un en attente.
+  // La file PORTE les chemins modifiés du dernier save (null = rien en attente) :
+  // sans eux, la relance ré-importerait le module changé une 2e fois (bloc 7b).
   let resetInFlight = false;
-  let resetQueued = false;
+  let resetQueuedPaths = null;
 
   /**
    * Restaure le fragment principal et réinjecte les scripts Vite
@@ -214,7 +223,7 @@
     }
 
     if (resetInFlight) {
-      resetQueued = true;
+      resetQueuedPaths = changedPaths;
       if (DEBUG) console.log('[Vite HMR] Reset déjà en vol — mis en file');
       return;
     }
@@ -293,14 +302,16 @@
       // module retirés par le nettoyage) que le cache ES module ne rejouerait jamais.
       const entryPaths = new Set(viteSourceScripts.map(i => i.src.split('?')[0]));
       const changedClean = changedPaths.map(p => p.split('?')[0]);
-      window.__WP_HMR_MODULES__.forEach(moduleUrl => {
+      lastModuleUrls.forEach(moduleUrl => {
+        // URLs racine-Vite envoyées par le serveur (ex: /@fs/C:/.../modal.js)
         const cleanUrl = moduleUrl.split('?')[0];
-        if (entryPaths.has(cleanUrl) || cleanUrl.includes('/_libs/')) return;
+        const absoluteUrl = cleanUrl.startsWith('http') ? cleanUrl : VITE_ORIGIN + cleanUrl;
+        if (entryPaths.has(absoluteUrl) || cleanUrl.includes('/_libs/')) return;
         // Le module modifié est déjà réévalué via la chaîne d'imports des entrées
-        // (?t serveur) : le ré-importer ici l'évaluerait une 2e fois (?t client)
-        if (changedClean.some(p => cleanUrl.endsWith(p))) return;
+        // (?t serveur, invalidation isHmr) : le ré-importer ici l'évaluerait une 2e fois
+        if (changedClean.some(p => cleanUrl.endsWith(p) || absoluteUrl.endsWith(p))) return;
         scriptPromises.push(
-          import(/* @vite-ignore */ cleanUrl + '?t=' + timestamp).catch(() => {})
+          import(/* @vite-ignore */ absoluteUrl + '?t=' + timestamp).catch(() => {})
         );
       });
 
@@ -332,10 +343,11 @@
                 window.scrollTo(savedScrollPosition.x, savedScrollPosition.y);
               } catch (e) { /* Ignorer */ }
               resetInFlight = false;
-              if (resetQueued) {
-                resetQueued = false;
+              if (resetQueuedPaths !== null) {
+                const queuedPaths = resetQueuedPaths;
+                resetQueuedPaths = null;
                 if (DEBUG) console.log('[Vite HMR] Reset en file — relance');
-                resetBodyAndReinjectScripts();
+                resetBodyAndReinjectScripts(queuedPaths);
               }
             }, 50);
           }
@@ -344,9 +356,10 @@
     } catch (error) {
       console.error('[Vite HMR] Erreur lors de la réinitialisation:', error);
       resetInFlight = false;
-      if (resetQueued) {
-        resetQueued = false;
-        resetBodyAndReinjectScripts();
+      if (resetQueuedPaths !== null) {
+        const queuedPaths = resetQueuedPaths;
+        resetQueuedPaths = null;
+        resetBodyAndReinjectScripts(queuedPaths);
       }
     }
   }
@@ -368,38 +381,13 @@
     // Hook global pour forcer la réinitialisation (debug)
     window.__VITE_HMR_RESET__ = resetBodyAndReinjectScripts;
 
-    // Intercepter TOUS les updates HMR avant que Vite décide de reload
-    // On utilise 'vite:beforeUpdate' pour détecter les changements
-    import.meta.hot.on('vite:beforeUpdate', (payload) => {
-      // Vérifier s'il y a des updates JS UNIQUEMENT pour les fichiers .js du thème
-      // NE PAS réinitialiser pour les .scss, .css, ou hmr-body-reset.js
-      const jsUpdates = payload.updates?.filter(update =>
-        update.type === 'js-update' &&
-        update.path.endsWith('.js') &&
-        !update.path.includes('.scss') &&
-        !update.path.includes('.css') &&
-        !update.path.includes('hmr-body-reset.js')
-      );
-
-      // Retirer du payload les updates JS que Vite ne doit PAS appliquer lui-même :
-      // - les .js du thème (c'est notre reset qui les gère)
-      // - hmr-body-reset.js lui-même (une ré-import par Vite empilerait une 2e instance
-      //   de wrappers/baselines — l'édition de ce fichier exige un reload manuel)
-      if (payload.updates?.some(u => u.path.includes('hmr-body-reset.js'))) {
-        console.warn('[Vite HMR] hmr-body-reset.js modifié — recharge la page pour appliquer sa nouvelle version');
-      }
-      payload.updates = payload.updates.filter(update =>
-        !(update.type === 'js-update' &&
-          update.path.endsWith('.js') &&
-          !update.path.includes('.scss') &&
-          !update.path.includes('.css'))
-      );
-
-      if (jsUpdates && jsUpdates.length > 0) {
-        // Faire notre propre HMR (les modules modifiés seront réévalués via la
-        // chaîne d'imports des entrées : on les exclut du ré-import du registre)
-        resetBodyAndReinjectScripts(jsUpdates.map(u => u.path));
-      }
+    // Écouter l'événement custom envoyé par le plugin serveur (handleHotUpdate,
+    // API documentée Vite) : les js-updates du thème ne sont plus propagés par
+    // Vite lui-même — le serveur les a suspendus (return []), invalidés (isHmr)
+    // et nous notifie avec la liste des modules du thème et des modules changés
+    import.meta.hot.on('wp:theme-js-update', (data) => {
+      lastModuleUrls = data.moduleUrls || [];
+      resetBodyAndReinjectScripts(data.paths || []);
     });
   }
 

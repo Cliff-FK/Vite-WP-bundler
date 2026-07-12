@@ -3,13 +3,12 @@
  *
  * Injecté dans les documents ÉDITEUR (page admin parente + canvas iframé Gutenberg)
  * quand VITE_EDITOR=true. Rôle : garder le HMR CSS natif (bénéfice réel dans
- * l'éditeur) mais BLOQUER l'application des js-updates.
+ * l'éditeur) tout en signalant les changements JS du thème.
  *
- * Pourquoi : accept-all-hmr rend tous les modules du thème auto-acceptants ;
- * sans ce garde, chaque édition JS réévalue les modules dans l'éditeur SANS
- * l'infrastructure de reset du front (hmr-body-reset) → les abonnements
- * s'empilent à chaque save (wp.data.subscribe, acf.addAction...) et l'éditeur
- * se dégrade progressivement. Ici on absorbe l'update et on invite à recharger.
+ * Les js-updates du thème ne sont plus propagés par Vite : le plugin serveur
+ * (accept-all-hmr, handleHotUpdate) les suspend et émet l'événement custom
+ * 'wp:theme-js-update'. Côté éditeur, pas d'infrastructure de reset (le canvas
+ * est piloté par React/Gutenberg) : on invite simplement à recharger.
  */
 
 if (import.meta.hot) {
@@ -17,20 +16,11 @@ if (import.meta.hot) {
     // Ne rien faire sur ses propres changements
   });
 
-  import.meta.hot.on('vite:beforeUpdate', (payload) => {
-    const jsUpdates = (payload.updates || []).filter(update =>
-      update.type === 'js-update' &&
-      update.path.endsWith('.js') &&
-      !update.path.includes('.scss') &&
-      !update.path.includes('.css')
+  import.meta.hot.on('wp:theme-js-update', (data) => {
+    const files = (data.paths || []).map(p => p.split('/').pop()).join(', ') || (data.file || '').split('/').pop();
+    console.warn(
+      '[Vite Editor] JS du thème modifié — recharger l\'éditeur pour appliquer :',
+      files
     );
-
-    if (jsUpdates.length > 0) {
-      payload.updates = payload.updates.filter(update => !jsUpdates.includes(update));
-      console.warn(
-        '[Vite Editor] JS du thème modifié — recharger l\'éditeur pour appliquer :',
-        jsUpdates.map(u => u.path.split('/').pop()).join(', ')
-      );
-    }
   });
 }
