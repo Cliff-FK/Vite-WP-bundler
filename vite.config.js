@@ -214,8 +214,9 @@ export default defineConfig(async ({ command }) => {
 
         // Silencer les warnings de dépréciation Sass
         api: 'modern-compiler', // Utiliser la nouvelle API Sass
+        // 'import' volontairement NON silencé : le graphe est 100 % @use depuis
+        // la migration — toute réintroduction d'@import doit warner bruyamment.
         silenceDeprecations: [
-          'import',           // @import deprecated
           'legacy-js-api',    // Legacy API deprecated
           'global-builtin',   // Global built-in functions (lighten, darken, etc.)
           'color-functions',  // Color functions deprecated

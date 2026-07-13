@@ -12,6 +12,12 @@
  *     sur les patterns extglob type `bloc-parts/!(_libs)/**` — le monkey-patch
  *     de console.warn dans vite.config.js devient inutile)
  *   - pas d'option ignorePaths (jamais utilisée ici)
+ *   - les @use expansés reçoivent un alias unique `as gN` (compteur global au
+ *     fichier, jamais remis à zéro entre deux lignes de glob) : sans alias, deux
+ *     fichiers dont le basename partage le tronc avant premier point (_x.scss +
+ *     _x.min.scss, ou deux style.scss de dossiers différents) collisionnent sur
+ *     le même namespace → erreur de compilation. L'original n'émettait pas d'alias
+ *     (il ne visait que @import, sans namespace).
  */
 
 import path from 'path';
@@ -33,6 +39,7 @@ function isSassOrScss(filename) {
 function expandGlobs(src, filePath, fileName) {
   const isSass = path.extname(fileName).match(/\.sass/i);
   const contentLinesCount = src.split('\n').length;
+  let useAliasCount = 0; // compteur d'alias @use, global au fichier (cf. en-tête)
 
   for (let i = 0; i < contentLinesCount; i++) {
     const result = [...src.matchAll(IMPORT_REGEX)];
@@ -49,7 +56,8 @@ function expandGlobs(src, filePath, fileName) {
     files.forEach((filename) => {
       if (isSassOrScss(filename)) {
         const rel = path.relative(filePath, filename).replace(/\\/g, '/').replace(/^\//, '');
-        imports.push(`@${importType} "` + rel + '"' + (isSass ? '' : ';'));
+        const alias = importType === 'use' ? ` as g${useAliasCount++}` : '';
+        imports.push(`@${importType} "` + rel + '"' + alias + (isSass ? '' : ';'));
       }
     });
 
