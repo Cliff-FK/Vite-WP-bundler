@@ -128,10 +128,15 @@ export default defineConfig(async ({ command }) => {
         }
       },
       async load(id) {
-        // Charger les fichiers .min.js sans transformation
+        // Charger les fichiers .min.js sans transformation.
+        // Deux formes d'id arrivent ici : chemin FS absolu (import statique passé par resolveId)
+        // ou id préfixé @fs (import dynamique runtime, ex. modules Swiper de lib-loader.js),
+        // avec séparateurs / ou \ selon la plateforme → retirer tout préfixe jusqu'à « @fs/ »
+        // avant lecture, sinon ENOENT « C:\@fs\... ».
         if (id.endsWith('.min.js')) {
           const { readFileSync } = await import('fs');
-          const code = readFileSync(id, 'utf-8');
+          const fsPath = id.replace(/^.*?@fs[\\/]/, '').split('?')[0];
+          const code = readFileSync(fsPath, 'utf-8');
           return { code, map: null };
         }
       },

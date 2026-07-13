@@ -1,10 +1,13 @@
 import { copyFileSync, mkdirSync, existsSync, readdirSync, statSync, readFileSync } from 'fs';
-import { resolve, basename, join } from 'path';
+import { resolve, basename, join, dirname, sep } from 'path';
 import { PATHS } from '../paths.config.js';
 
 /**
  * Plugin Rollup pour copier les fichiers .min.js dans le dossier de build
- * Scanne récursivement le dossier JS source pour trouver tous les .min.js
+ * Scanne récursivement le dossier JS source pour trouver tous les .min.js.
+ * Les fichiers directement dans un dossier _libs/ sont copiés à plat dans js/ ;
+ * les SOUS-DOSSIERS de _libs/ sont préservés (ex. _libs/swiper/nav.min.js → js/swiper/nav.min.js),
+ * car les imports dynamiques runtime (lib-loader.js) référencent ces chemins relatifs.
  */
 export function copyMinifiedLibsPlugin() {
   return {
@@ -66,23 +69,32 @@ export function copyMinifiedLibsPlugin() {
         return;
       }
 
-      // Dédupliquer par nom de fichier (garder le premier trouvé)
+      // Chemin de destination relatif : portion après le dernier segment `_libs` du chemin
+      // source (préserve les sous-dossiers de _libs/), sinon nom de fichier seul.
+      const destRelOf = (filePath) => {
+        const parts = filePath.split(sep);
+        const libsIdx = parts.lastIndexOf('_libs');
+        return libsIdx !== -1 ? parts.slice(libsIdx + 1).join(sep) : basename(filePath);
+      };
+
+      // Dédupliquer par chemin relatif de destination (garder le premier trouvé)
       const uniqueFiles = new Map();
       for (const filePath of minifiedFiles) {
-        const fileName = basename(filePath);
-        if (!uniqueFiles.has(fileName)) {
-          uniqueFiles.set(fileName, filePath);
+        const destRel = destRelOf(filePath);
+        if (!uniqueFiles.has(destRel)) {
+          uniqueFiles.set(destRel, filePath);
         }
       }
 
-      // Copier chaque fichier unique
-      for (const [fileName, sourcePath] of uniqueFiles) {
-        const destPath = resolve(jsOutputPath, fileName);
+      // Copier chaque fichier unique (en créant les sous-dossiers préservés)
+      for (const [destRel, sourcePath] of uniqueFiles) {
+        const destPath = resolve(jsOutputPath, destRel);
 
         try {
+          mkdirSync(dirname(destPath), { recursive: true });
           copyFileSync(sourcePath, destPath);
         } catch (err) {
-          console.warn(`Erreur copie ${fileName}:`, err.message);
+          console.warn(`Erreur copie ${destRel}:`, err.message);
         }
       }
     }
