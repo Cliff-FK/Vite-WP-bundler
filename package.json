@@ -9,6 +9,7 @@
     "dev": "node scripts/dev-parallel.js",
     "dev:sequential": "vite",
     "build": "vite build",
+    "build:swiper": "node scripts/build-swiper-libs.mjs",
     "preview": "vite preview",
     "clean": "rimraf node_modules package-lock.json",
     "reinstall": "npm run clean && npm install --ignore-scripts",
@@ -30,6 +31,7 @@
     "rimraf": "^6.1.3",
     "sass": "^1.69.7",
     "sass-embedded": "^1.100.0",
+    "swiper": "^14.0.5",
     "vite": "^8.1.4"
   },
   "engines": {
