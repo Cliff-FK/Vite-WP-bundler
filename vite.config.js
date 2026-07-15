@@ -174,32 +174,44 @@ export default defineConfig(async ({ command }) => {
     }] : []),
 
     // Plugin personnalisé pour ignorer les sourcemaps des fichiers minifiés
+    // Hook filters déclaratifs (Vite/Rolldown) : le tri se fait côté Rust, les
+    // handlers JS ne sont plus appelés pour chaque module du graphe (PLUGIN_TIMINGS
+    // montrait ~29 % du build perdu dans ces hooks appelés à vide).
     {
       name: 'ignore-minified-sourcemaps',
-      resolveId(source) {
-        // Bloquer toutes les requêtes de fichiers .map
-        if (source.endsWith('.map') || source.includes('.min.js.map') || source.includes('lottie-player.js.map') || source.includes('swiper-bundle.min.js.map')) {
-          return { id: source, external: true };
-        }
+      resolveId: {
+        filter: { id: /\.map($|\?)/ },
+        handler(source) {
+          // Bloquer toutes les requêtes de fichiers .map
+          if (source.endsWith('.map') || source.includes('.min.js.map') || source.includes('lottie-player.js.map') || source.includes('swiper-bundle.min.js.map')) {
+            return { id: source, external: true };
+          }
+        },
       },
-      load(id) {
-        // Intercepter le chargement des .map et retourner un sourcemap vide
-        if (id.endsWith('.map') || id.includes('.min.js.map')) {
-          return {
-            code: 'export default {}',
-            map: null,
-          };
-        }
+      load: {
+        filter: { id: /\.map($|\?)/ },
+        handler(id) {
+          // Intercepter le chargement des .map et retourner un sourcemap vide
+          if (id.endsWith('.map') || id.includes('.min.js.map')) {
+            return {
+              code: 'export default {}',
+              map: null,
+            };
+          }
+        },
       },
-      transform(code, id) {
-        // Supprimer les sourcemaps des fichiers minifiés
-        if (id.endsWith('.min.js')) {
-          const cleanCode = code.replace(/\/\/# sourceMappingURL=.*/g, '').replace(/\/\*# sourceMappingURL=.*\*\//g, '');
-          return {
-            code: cleanCode,
-            map: null,
-          };
-        }
+      transform: {
+        filter: { id: /\.min\.js$/ },
+        handler(code, id) {
+          // Supprimer les sourcemaps des fichiers minifiés
+          if (id.endsWith('.min.js')) {
+            const cleanCode = code.replace(/\/\/# sourceMappingURL=.*/g, '').replace(/\/\*# sourceMappingURL=.*\*\//g, '');
+            return {
+              code: cleanCode,
+              map: null,
+            };
+          }
+        },
       },
       handleHotUpdate({ file }) {
         // Ignorer les erreurs de sourcemap dans le HMR
@@ -230,6 +242,11 @@ export default defineConfig(async ({ command }) => {
       },
     },
     devSourcemap: true, // Sourcemaps en dev
+
+    // Compiler les entrées Sass en parallèle dans des worker threads
+    // (nb de workers = cœurs CPU - 1) ; sans effet sur la sortie, gain
+    // uniquement sur le temps de build (vite:css était ~69 % du temps plugins)
+    preprocessorMaxWorkers: true,
 
     // PostCSS plugins pour traiter le CSS compilé
     postcss: {
