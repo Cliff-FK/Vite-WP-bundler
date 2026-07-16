@@ -5,7 +5,9 @@ import { phpReloadPlugin } from './plugins/php-reload.plugin.js';
 import {
   detectAssetsFromWordPress,
   generateRollupInputs,
-  detectBuildStructure
+  detectBuildStructure,
+  detectBlockCssInputs,
+  assertNoOutputCollisions
 } from './plugins/wordpress-assets-detector.plugin.js';
 import { portKillerPlugin } from './plugins/port-killer.plugin.js';
 import { cleanupMuPluginOnClose } from './plugins/cleanup-mu-plugin.js';
@@ -16,39 +18,12 @@ import { copyStaticAssetsPlugin } from './plugins/copy-static-assets.plugin.js';
 import { serveStaticAssetsPlugin } from './plugins/serve-static-assets.plugin.js';
 import { sassGlobImports } from './plugins/sass-glob-import.plugin.js';
 import { resolve } from 'path';
-import { readdirSync, existsSync } from 'fs';
 
-// CSS par bloc (chargement conditionnel WP) : chaque `templates/bloc-parts/<bloc>/*.scss`
-// (hors _libs/_base-block et hors editor*) devient une entrée Rollup propre →
-// dist/css/<basename>.min.css, enregistrée côté PHP comme style handle du bloc
-// (cf. includes/addons/add-block-infra.php) et enqueuée par WP seulement quand le bloc
-// est rendu. Les component-parts restent dans le bundle global style.min.css (briques
-// transverses : consommées par le JS global et les helpers immolead).
-// Convention de nommage héritée de generateRollupInputs : `<dossier>§<basename>` →
-// assetFileNames ne garde que le basename → collision détectée ici, build en échec BRUYANT.
-function generateBlockCssInputs(themePath) {
-  const blocksDir = resolve(themePath, 'templates/bloc-parts');
-  const inputs = {};
-  const seen = new Map();
-  if (!existsSync(blocksDir)) return inputs;
-  for (const dir of readdirSync(blocksDir, { withFileTypes: true })) {
-    if (!dir.isDirectory() || ['_libs', '_base-block'].includes(dir.name)) continue;
-    const blockPath = resolve(blocksDir, dir.name);
-    // Blocs nichés inclus (ex. b-acc/b-acc-item) : profondeur 1 suffit (convention projet)
-    const scanDirs = [blockPath, ...readdirSync(blockPath, { withFileTypes: true })
-      .filter(e => e.isDirectory()).map(e => resolve(blockPath, e.name))];
-    for (const scanDir of scanDirs) {
-      for (const f of readdirSync(scanDir)) {
-        if (!f.endsWith('.scss') || f.startsWith('editor')) continue;
-        const base = f.replace(/\.scss$/, '');
-        if (seen.has(base)) throw new Error(`[block-css] Collision de basename CSS de bloc : "${base}" (${seen.get(base)} et ${dir.name})`);
-        seen.set(base, dir.name);
-        inputs[`${dir.name}§${base}`] = resolve(scanDir, f);
-      }
-    }
-  }
-  return inputs;
-}
+// CSS par bloc (chargement conditionnel WP) : chaque feuille d'un dossier de bloc détecté
+// devient une entrée Rollup propre → dist/css/<basename>.min.css, enqueuée par WP seulement
+// quand le bloc est rendu. La détection des blocs est 100 % générique (marqueurs natifs WP :
+// block.json, register_block_type PHP, registerBlockType JS) — voir detectBlockCssInputs
+// dans plugins/wordpress-assets-detector.plugin.js.
 
 export default defineConfig(async ({ command }) => {
   // console.log('[Vite Config] Command:', command);
@@ -67,10 +42,12 @@ export default defineConfig(async ({ command }) => {
     buildFolder = BUILD_FOLDER || detectedAssets.buildFolder || PATHS.assetFolders.dist;
     // Retirer le slash de début si présent (pour que resolve() fonctionne correctement)
     buildFolder = buildFolder.replace(/^\//, '');
-    rollupInputs = { ...generateRollupInputs(detectedAssets), ...generateBlockCssInputs(PATHS.themePath) };
-
     // Détecter la structure du dossier de build (flat vs sous-dossiers)
     buildStructure = detectBuildStructure();
+
+    rollupInputs = { ...generateRollupInputs(detectedAssets), ...detectBlockCssInputs(buildFolder) };
+    // Deux entrées produisant le même fichier final s'écraseraient en silence → échec bruyant
+    assertNoOutputCollisions(rollupInputs, buildStructure && buildStructure.isFlat);
   }
 
   return {

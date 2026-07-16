@@ -1,6 +1,7 @@
 import { PATHS, PHP_FILES_TO_SCAN } from '../paths.config.js';
-import { existsSync, readdirSync, readFileSync, openSync, readSync, closeSync } from 'fs';
-import { resolve, join, sep, extname } from 'path';
+import { existsSync, readdirSync, readFileSync, openSync, readSync, closeSync, statSync, writeFileSync, mkdirSync } from 'fs';
+import { resolve, join, sep, extname, dirname } from 'path';
+import { spawnSync } from 'child_process';
 import { getCachedAssets, saveCachedAssets, deleteOldBuildFolder } from './cache-manager.plugin.js';
 
 // Cache en mémoire des assets détectés pour éviter le double scan dans la même session
@@ -1058,6 +1059,408 @@ export function generateRollupInputs(assets) {
       console.warn(`   ${file} - Enqueue détecté mais fichier absent`);
     });
     console.warn(`   Le build continuera sans ces fichiers\n`);
+  }
+
+  return inputs;
+}
+
+/**
+ * ============================
+ * DÉTECTION DES BLOCS (marqueurs natifs WP)
+ * ============================
+ * Un thème peut déclarer ses blocs par plusieurs technologies natives WordPress ; on les
+ * parse TOUTES pour générer une entrée CSS par feuille de bloc (chargement conditionnel
+ * côté WP via style_handles) :
+ *   P1. block.json — marqueur canonique. Couvre aussi les collections de métadonnées
+ *       (wp_register_block_metadata_collection) : le manifest n'est qu'un cache des block.json.
+ *   P2. PHP — register_block_type(_from_metadata) à chemin statiquement résoluble ;
+ *       wp_register_block_types_from_metadata_collection → racine de scan additionnelle ;
+ *       forme nom+args : 'style'/'editor_style' => handle, résolu via wp_register_style
+ *       puis remonté au fichier source (findSourceFile).
+ *   P3. JS — registerBlockType( dans un JS source : le dossier du fichier déclarant est un bloc.
+ * Règles communes : les *.scss DIRECTS d'un dossier de bloc (hors editor* — convention WP,
+ * les styles éditeur s'enqueuent à part) deviennent chacun une entrée `<dossier>§<basename>` ;
+ * la sortie ne garde que le basename → collision de basename = échec BRUYANT du build.
+ * Appel non résoluble statiquement (chemin en variable, boucle) → listé au log, jamais avalé
+ * en silence : le bloc reste couvert s'il porte un block.json. Rien trouvé → {}, comportement
+ * stock du bundler.
+ */
+
+const BLOCK_SCAN_IGNORE = ['node_modules', 'vendor', '.git', '.vite', 'languages'];
+
+/**
+ * Liste (chemins absolus) des dossiers contenant un block.json sous une racine.
+ * Les dossiers préfixés `_` sont privés/désactivés (même convention que les partials
+ * Sass : archive de blocs, gabarits de base) → jamais traversés.
+ */
+function findBlockJsonDirs(rootAbs, ignoreDirs) {
+  const dirs = [];
+  if (!existsSync(rootAbs)) return dirs;
+
+  const walk = (dir) => {
+    let items;
+    try { items = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const item of items) {
+      if (item.isDirectory()) {
+        if (!ignoreDirs.includes(item.name) && !item.name.startsWith('.') && !item.name.startsWith('_')) walk(join(dir, item.name));
+      } else if (item.name === 'block.json') {
+        dirs.push(dir);
+      }
+    }
+  };
+
+  walk(rootAbs);
+  return dirs;
+}
+
+/**
+ * Extrait les appels `nom( ... )` d'un source PHP/JS avec parenthésage équilibré
+ * (les parenthèses/virgules dans les chaînes sont ignorées).
+ * @returns {Array<{name: string, args: string}>} - args = blob brut entre les parenthèses
+ */
+function extractCalls(content, callNames) {
+  const calls = [];
+  const re = new RegExp(`\\b(${callNames.join('|')})\\s*\\(`, 'g');
+  let m;
+  while ((m = re.exec(content)) !== null) {
+    let depth = 1, i = re.lastIndex, quote = null;
+    while (i < content.length && depth > 0) {
+      const c = content[i];
+      if (quote) { if (c === '\\') i++; else if (c === quote) quote = null; }
+      else if (c === "'" || c === '"') quote = c;
+      else if (c === '(') depth++;
+      else if (c === ')') depth--;
+      i++;
+    }
+    calls.push({ name: m[1], args: content.slice(re.lastIndex, i - 1) });
+    re.lastIndex = i;
+  }
+  return calls;
+}
+
+/**
+ * Split d'un blob d'arguments sur les virgules de premier niveau uniquement.
+ */
+function splitTopLevelArgs(blob) {
+  const args = [];
+  let depth = 0, quote = null, start = 0;
+  for (let i = 0; i < blob.length; i++) {
+    const c = blob[i];
+    if (quote) { if (c === '\\') i++; else if (c === quote) quote = null; }
+    else if (c === "'" || c === '"') quote = c;
+    else if (c === '(' || c === '[') depth++;
+    else if (c === ')' || c === ']') depth--;
+    else if (c === ',' && depth === 0) { args.push(blob.slice(start, i)); start = i + 1; }
+  }
+  args.push(blob.slice(start));
+  return args.map(a => a.trim()).filter(Boolean);
+}
+
+/**
+ * Résout statiquement une expression PHP de chemin : littéraux, __DIR__, helpers de thème,
+ * constantes WP de chemin, concaténation `.`. Retourne un chemin absolu, ou null si un
+ * segment n'est pas résoluble (variable, appel inconnu).
+ */
+function resolvePhpPathExpr(expr, phpDirAbs) {
+  const tokenRe = /(__DIR__|get_template_directory\(\)|get_stylesheet_directory\(\)|get_theme_file_path\(\s*['"]([^'"]*)['"]\s*\)|ABSPATH|WP_CONTENT_DIR|WP_PLUGIN_DIR|'([^']*)'|"([^"]*)")\s*(?:\.\s*|$)/y;
+  const src = expr.trim();
+  let out = '', pos = 0;
+  while (pos < src.length) {
+    tokenRe.lastIndex = pos;
+    const m = tokenRe.exec(src);
+    if (!m) return null;
+    const t = m[1];
+    if (t === '__DIR__') out += phpDirAbs;
+    else if (t.startsWith('get_template_directory') || t.startsWith('get_stylesheet_directory')) out += PATHS.themePath;
+    else if (t.startsWith('get_theme_file_path')) out += join(PATHS.themePath, m[2]);
+    else if (t === 'ABSPATH') out += PATHS.wpRoot + sep;
+    else if (t === 'WP_CONTENT_DIR') out += join(PATHS.wpRoot, 'wp-content');
+    else if (t === 'WP_PLUGIN_DIR') out += join(PATHS.wpRoot, 'wp-content', 'plugins');
+    else out += m[3] !== undefined ? m[3] : m[4];
+    pos = tokenRe.lastIndex;
+  }
+  return out ? out : null;
+}
+
+/**
+ * Map handle → chemin buildé (relatif au thème) depuis les wp_register_style /
+ * wp_enqueue_style du thème (réutilise la résolution constantes/variables existante).
+ */
+function buildStyleHandleMap(phpSources, allPhpContent) {
+  const map = {};
+  const constants = parsePhpConstants(allPhpContent);
+  for (const { content } of phpSources) {
+    for (const call of extractCalls(content, ['wp_register_style', 'wp_enqueue_style'])) {
+      const [handleArg, urlArg] = splitTopLevelArgs(call.args);
+      const h = handleArg && handleArg.match(/^['"]([^'"]+)['"]$/);
+      if (!h || !urlArg) continue;
+      const vars = parsePhpVariables(allPhpContent, extractVariablesFromUrl(urlArg));
+      const url = resolvePhpUrl(urlArg, constants, vars)
+        .replace(/get_(?:template|stylesheet)_directory_uri\(\)\s*(?:\.\s*)?/g, '')
+        .replace(/^['"]|['"]$/g, '')
+        .split('?')[0]
+        .replace(/^\//, '');
+      if (url && /\.css$/.test(url)) map[h[1]] = url;
+    }
+  }
+  return map;
+}
+
+/**
+ * Garde anti-collision de SORTIE sur l'ensemble des entrées Rollup FUSIONNÉES (entrées
+ * classiques + entrées de blocs) : la sortie CSS ne garde que le basename (assetFileNames),
+ * et le JS aussi en structure plate (entryFileNames) — deux entrées de même basename
+ * s'écraseraient donc EN SILENCE dans le dist. Échec bruyant avec la liste des sources.
+ * Complémentaire de la dédup interne de detectBlockCssInputs : elle voit les collisions
+ * ENTRE ensembles (ex. un bloc nommé style.scss vs le style.min.css global), que chaque
+ * générateur pris isolément ne peut pas voir.
+ * @param {Object} inputs - Entrées Rollup fusionnées { clé: cheminAbsolu }
+ * @param {boolean} isFlat - Structure de build plate (JS aussi réduit au basename)
+ */
+export function assertNoOutputCollisions(inputs, isFlat) {
+  const outputs = new Map(); // fichier final → [sources]
+  for (const [key, src] of Object.entries(inputs)) {
+    const isCss = /\.(scss|css)$/.test(normalizePath(src));
+    const base = key.split('§').pop();
+    const out = isCss
+      ? `${base}.min.css`
+      : (isFlat ? `${base}.min.js` : `${key.replace(/§/g, '/')}.min.js`);
+    if (!outputs.has(out)) outputs.set(out, []);
+    outputs.get(out).push(normalizePath(src));
+  }
+  const clashes = [...outputs.entries()].filter(([, srcs]) => new Set(srcs).size > 1);
+  if (clashes.length) {
+    const detail = clashes
+      .map(([out, srcs]) => `  ${out} serait produit par :\n    ${[...new Set(srcs)].join('\n    ')}`)
+      .join('\n');
+    throw new Error(`[block-detector] Collision de fichiers de sortie (écrasement silencieux évité) :\n${detail}`);
+  }
+}
+
+/**
+ * ---- Vérification « code vivant » via le registre WP à runtime ----
+ * WP est le SEUL oracle fiable du vivant : l'enregistrement des blocs est dynamique
+ * (boucles sur scandir, conditions, options en DB), donc statiquement indécidable.
+ * On demande à WP-CLI la liste des blocs réellement enregistrés, avec :
+ *   - cache (.cache/registered-blocks.json) invalidé par le mtime le plus récent des PHP
+ *     du thème (l'enregistrement vit dans le PHP) + TTL 24 h en filet pour les changements
+ *     côté DB (activation de plugin) → coût 0 ms en régime de croisière ;
+ *   - dégradation propre : WP-CLI introuvable / WP ou DB down → vérification sautée avec
+ *     log, jamais de dépendance dure au site pour builder.
+ * Config .env : WP_CLI_BIN (binaire, défaut `wp` du PATH), VERIFY_BLOCKS_RUNTIME=false
+ * pour couper, STRICT_LIVE_BLOCKS=true pour EXCLURE les blocs non enregistrés (défaut :
+ * avertir seulement — l'exclusion par défaut rendrait le build non déterministe selon
+ * l'état de la DB, et exclure à tort un bloc vivant casse la prod : risque asymétrique).
+ */
+
+const LIVE_CACHE_FILE = resolve(PATHS.bundlerRoot, '.cache', 'registered-blocks.json');
+const LIVE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Liste des noms de blocs enregistrés côté WP (Set), ou null si l'oracle est indisponible.
+ * @returns {{ names: Set<string>|null, via: string }} - via = 'cache' | 'wp-cli' | raison de l'échec
+ */
+function getRegisteredBlockNames(phpSources) {
+  let maxMtime = 0;
+  for (const { abs } of phpSources) {
+    try { const t = statSync(abs).mtimeMs; if (t > maxMtime) maxMtime = t; } catch { /* ignoré */ }
+  }
+  const cacheKey = String(maxMtime);
+
+  try {
+    const c = JSON.parse(readFileSync(LIVE_CACHE_FILE, 'utf-8'));
+    if (c.key === cacheKey && Date.now() - c.at < LIVE_CACHE_TTL_MS) {
+      return { names: new Set(c.names), via: 'cache' };
+    }
+  } catch { /* cache absent/invalide → interroger */ }
+
+  const bin = process.env.WP_CLI_BIN || 'wp';
+  const code = 'echo json_encode(array_keys(WP_Block_Type_Registry::get_instance()->get_all_registered()));';
+  // shell:true (obligatoire pour les .bat sous Windows) → commande pré-quotée
+  const res = spawnSync(`"${bin}" eval "${code}" --path="${PATHS.wpRoot}"`, {
+    shell: true,
+    timeout: 20000,
+    encoding: 'utf-8',
+  });
+  const jsonMatch = (res.stdout || '').match(/\[[^\]]*\]/s);
+  if (res.status !== 0 || !jsonMatch) {
+    const raison = (res.error && res.error.message) || (res.stderr || '').trim().split('\n').pop() || 'sortie WP-CLI vide';
+    return { names: null, via: raison };
+  }
+  let names;
+  try { names = JSON.parse(jsonMatch[0]); } catch { return { names: null, via: 'JSON WP-CLI invalide' }; }
+
+  try {
+    mkdirSync(dirname(LIVE_CACHE_FILE), { recursive: true });
+    writeFileSync(LIVE_CACHE_FILE, JSON.stringify({ key: cacheKey, at: Date.now(), names }));
+  } catch { /* cache non bloquant */ }
+
+  return { names: new Set(names), via: 'wp-cli' };
+}
+
+/**
+ * Génère les entrées Rollup CSS-par-bloc depuis TOUS les marqueurs natifs (P1/P2/P3).
+ * @param {string} buildFolderName - Nom du dossier de build (exclu des scans)
+ * @returns {Object} - Entrées { '<dossier>§<basename>': cheminAbsolu }
+ */
+export function detectBlockCssInputs(buildFolderName = PATHS.assetFolders.dist) {
+  const inputs = {};
+  const seen = new Map();          // basename → chemin source (collision bruyante)
+  const blockDirs = new Set();     // dossiers de bloc (absolus normalisés)
+  const report = { blockJson: 0, php: 0, js: 0, handles: 0, unresolved: [] };
+  const ignoreDirs = [...new Set([...BLOCK_SCAN_IGNORE, buildFolderName])];
+  const relTheme = (abs) => normalizePath(abs).replace(normalizePath(PATHS.themePath) + '/', '');
+  const short = (s) => (s.length > 90 ? s.slice(0, 87) + '…' : s).replace(/\s+/g, ' ');
+
+  const addBlockDir = (dirAbs, origin) => {
+    const key = normalizePath(dirAbs);
+    if (blockDirs.has(key)) return;
+    blockDirs.add(key);
+    report[origin]++;
+  };
+
+  const addSourceEntry = (srcAbs) => {
+    const norm = normalizePath(srcAbs);
+    const base = norm.split('/').pop().replace(/\.(scss|css)$/, '');
+    if (base.startsWith('editor') || base.startsWith('_')) return; // styles éditeur et partials Sass
+    const prev = seen.get(base);
+    if (prev && prev !== norm) {
+      throw new Error(`[block-detector] Collision de basename CSS de bloc : "${base}"\n  ${prev}\n  ${norm}`);
+    }
+    if (prev) return;
+    seen.set(base, norm);
+    inputs[`${norm.split('/').slice(-2, -1)[0]}§${base}`] = srcAbs;
+  };
+
+  // Un segment de chemin préfixé `_` = privé/désactivé (archive, gabarit) : hors détection
+  const inPrivateDir = (rel) => /(^|\/)_/.test(normalizePath(rel));
+
+  // ---- Parsing PHP (P2) : collecte racines de collections, dossiers directs, handles
+  const phpSources = findFilesRecursive(PATHS.themePath, ['.php'], ignoreDirs)
+    .filter((rel) => !inPrivateDir(rel))
+    .map((rel) => {
+      const abs = resolve(PATHS.themePath, rel);
+      try { return { abs, content: readFileSync(abs, 'utf-8') }; } catch { return null; }
+    })
+    .filter(Boolean);
+  const allPhpContent = phpSources.map((s) => s.content).join('\n');
+  const collectionRoots = [];
+  const phpBlockDirs = [];
+  const handleSources = [];
+  let handleMap = null; // construit à la demande (coût nul sans forme nom+args)
+
+  for (const { abs, content } of phpSources) {
+    if (!/register_block_type|metadata_collection/.test(content)) continue;
+
+    // Collections de métadonnées → racines de scan block.json additionnelles
+    for (const call of extractCalls(content, ['wp_register_block_types_from_metadata_collection', 'wp_register_block_metadata_collection'])) {
+      const [pathArg] = splitTopLevelArgs(call.args);
+      const p = pathArg && resolvePhpPathExpr(pathArg, dirname(abs));
+      if (p && existsSync(p)) collectionRoots.push(p);
+      else report.unresolved.push(`${relTheme(abs)} → ${call.name}(${short(pathArg || '')})`);
+    }
+
+    // register_block_type : forme chemin OU forme nom+args
+    for (const call of extractCalls(content, ['register_block_type', 'register_block_type_from_metadata'])) {
+      const args = splitTopLevelArgs(call.args);
+      const arg1 = args[0] || '';
+      const nameForm = arg1.match(/^['"]([\w-]+\/[\w-]+)['"]$/);
+
+      if (nameForm) {
+        // Forme nom+args : extraire les handles style/editor_style, remonter aux sources
+        const styleHandles = [];
+        const blob = args.slice(1).join(',');
+        const hRe = /['"](?:style|editor_style)['"]\s*=>\s*(?:'([^']+)'|"([^"]+)"|(?:array\s*\(|\[)([^\])]*))/g;
+        let hm;
+        while ((hm = hRe.exec(blob)) !== null) {
+          if (hm[3] !== undefined) {
+            for (const part of hm[3].split(',')) {
+              const q = part.trim().match(/^['"]([^'"]+)['"]$/);
+              if (q) styleHandles.push(q[1]);
+            }
+          } else {
+            styleHandles.push(hm[1] !== undefined ? hm[1] : hm[2]);
+          }
+        }
+        if (!styleHandles.length) continue; // bloc sans style déclaré : rien à builder
+        handleMap = handleMap || buildStyleHandleMap(phpSources, allPhpContent);
+        for (const h of styleHandles) {
+          const built = handleMap[h];
+          const source = built && findSourceFile(built);
+          if (source && /\.(scss|css)$/.test(source)) {
+            handleSources.push(resolve(PATHS.themePath, source));
+          } else {
+            report.unresolved.push(`${relTheme(abs)} → bloc '${nameForm[1]}', handle '${h}' sans source retrouvable`);
+          }
+        }
+      } else {
+        const p = arg1 && resolvePhpPathExpr(arg1, dirname(abs));
+        const dir = p && existsSync(p) ? (statSync(p).isDirectory() ? p : dirname(p)) : null;
+        if (dir) phpBlockDirs.push(dir);
+        else report.unresolved.push(`${relTheme(abs)} → ${call.name}(${short(arg1)})`);
+      }
+    }
+  }
+
+  // ---- P1 : block.json (thème + racines de collections) — marqueur canonique, prioritaire
+  for (const root of [PATHS.themePath, ...collectionRoots]) {
+    for (const dir of findBlockJsonDirs(root, ignoreDirs)) addBlockDir(dir, 'blockJson');
+  }
+
+  // ---- P2 : dossiers issus des chemins PHP résolus
+  for (const dir of phpBlockDirs) addBlockDir(dir, 'php');
+
+  // ---- P3 : registerBlockType( dans les JS sources
+  const jsFiles = findFilesRecursive(PATHS.themePath, ['.js'], ignoreDirs)
+    .filter((f) => !f.endsWith('.min.js') && !inPrivateDir(f));
+  for (const rel of jsFiles) {
+    const abs = resolve(PATHS.themePath, rel);
+    let content;
+    try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+    if (/\bregisterBlockType\s*\(/.test(content)) addBlockDir(dirname(abs), 'js');
+  }
+
+  // ---- Vérification « code vivant » : croisement avec le registre WP à runtime.
+  // Ne s'applique qu'aux dossiers porteurs d'un block.json (server-registered) : les blocs
+  // P3 (registerBlockType JS pur) sont client-side, absents du registre PHP par nature,
+  // et les dossiers P2 sans block.json n'ont pas de nom à croiser.
+  if (process.env.VERIFY_BLOCKS_RUNTIME !== 'false') {
+    const strict = process.env.STRICT_LIVE_BLOCKS === 'true';
+    const { names: registered, via } = getRegisteredBlockNames(phpSources);
+    if (!registered) {
+      console.log(`[block-detector] vérification runtime sautée (${via}) — détection statique seule`);
+    } else {
+      report.registryVia = `${registered.size} bloc(s) au registre WP (${via})`;
+      for (const dir of [...blockDirs]) {
+        let name = null;
+        try { name = JSON.parse(readFileSync(join(dir, 'block.json'), 'utf-8')).name || null; } catch { /* pas de block.json */ }
+        if (!name || registered.has(name)) continue;
+        console.log(`[block-detector]   bloc '${name}' présent sur disque mais NON enregistré côté WP${strict ? ' → EXCLU' : ' → conservé (STRICT_LIVE_BLOCKS=true pour exclure)'} : ${relTheme(dir)}`);
+        if (strict) blockDirs.delete(dir);
+      }
+    }
+  }
+
+  // ---- Entrées : *.scss directs de chaque dossier de bloc + sources résolues par handle
+  for (const dir of blockDirs) {
+    let files;
+    try { files = readdirSync(dir); } catch { continue; }
+    for (const f of files) {
+      if (f.endsWith('.scss')) addSourceEntry(join(dir, f));
+    }
+  }
+  for (const src of handleSources) {
+    addSourceEntry(src);
+    report.handles++;
+  }
+
+  // ---- Récapitulatif (jamais silencieux sur les non-résolus)
+  const total = Object.keys(inputs).length;
+  if (total || report.unresolved.length) {
+    console.log(`[block-detector] ${total} entrée(s) CSS de bloc — ${report.blockJson} bloc(s) via block.json, ${report.php} via chemin PHP, ${report.js} via registerBlockType JS${report.handles ? `, ${report.handles} source(s) via handle` : ''}${report.registryVia ? ` — vivant vérifié : ${report.registryVia}` : ''}`);
+    for (const u of report.unresolved) {
+      console.log(`[block-detector]   non résolu statiquement : ${u}`);
+    }
   }
 
   return inputs;
