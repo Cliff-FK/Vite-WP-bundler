@@ -1454,9 +1454,10 @@ export function detectBlockCssInputs(buildFolderName = PATHS.assetFolders.dist) 
     report.handles++;
   }
 
-  // ---- Récapitulatif (jamais silencieux sur les non-résolus)
+  // ---- Récapitulatif : détail gated par BLOCK_DETECTOR_VERBOSE=true (.env) — les ANOMALIES
+  // (bloc non enregistré, vérification sautée) restent toujours visibles plus haut.
   const total = Object.keys(inputs).length;
-  if (total || report.unresolved.length) {
+  if (process.env.BLOCK_DETECTOR_VERBOSE === 'true' && (total || report.unresolved.length)) {
     console.log(`[block-detector] ${total} entrée(s) CSS de bloc — ${report.blockJson} bloc(s) via block.json, ${report.php} via chemin PHP, ${report.js} via registerBlockType JS${report.handles ? `, ${report.handles} source(s) via handle` : ''}${report.registryVia ? ` — vivant vérifié : ${report.registryVia}` : ''}`);
     for (const u of report.unresolved) {
       console.log(`[block-detector]   non résolu statiquement : ${u}`);
