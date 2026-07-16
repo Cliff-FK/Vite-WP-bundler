@@ -75,12 +75,23 @@ export function sassGlobImports() {
     name: 'sass-glob-import',
     enforce: 'pre',
 
-    transform(src, id) {
-      const result = { code: src, map: null };
-      if (FILE_REGEX.test(id)) {
-        result.code = expandGlobs(src, path.dirname(id), path.basename(id));
-      }
-      return result;
+    // Hook filters déclaratifs (Vite 8/Rolldown) : tri côté Rust, le handler JS
+    // n'est appelé QUE pour les fichiers Sass dont la source contient un motif
+    // glob dans un @import/@use (id ET code doivent matcher). Sans filtre, le
+    // hook était invoqué à vide pour chaque module du graphe (PLUGIN_TIMINGS
+    // l'imputait à ~36 % du temps plugins) et retournait un faux résultat de
+    // transformation ({ code: src }) pour les modules non concernés.
+    transform: {
+      filter: {
+        id: FILE_REGEX,
+        code: /@(?:import|use)\s+["'][^"']*\*/,
+      },
+      handler(src, id) {
+        return {
+          code: expandGlobs(src, path.dirname(id), path.basename(id)),
+          map: null,
+        };
+      },
     },
   };
 }
