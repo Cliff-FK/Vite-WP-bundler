@@ -9,7 +9,7 @@
  */
 
 import { PATHS } from '../paths.config.js';
-import { detectAssetsFromWordPress } from './wordpress-assets-detector.plugin.js';
+import { detectAssetsFromWordPress, detectBlockCssInputs } from './wordpress-assets-detector.plugin.js';
 import { getMultisiteSites, getSiteName } from './multisite-detector.plugin.js';
 import { mkdirSync, writeFileSync, existsSync, unlinkSync, rmdirSync, readdirSync, readFileSync, watch } from 'fs';
 import { resolve, dirname } from 'path';
@@ -136,6 +136,27 @@ async function generateMuPluginContent() {
   const frontSources = detectedAssets.front.sources;
   const adminSources = detectedAssets.admin.sources;
   const editorSources = detectedAssets.editor.sources;
+
+  // CSS-par-bloc (chargement conditionnel) : ces feuilles sont enregistrées DYNAMIQUEMENT (au
+  // render du bloc, via style_handles) et n'apparaissent donc pas dans le scan statique de
+  // functions.php — sans traitement, le mode dev les servait depuis le build (aucun HMR), alors
+  // que servir CHAQUE css en HMR est la promesse du bundler. detectBlockCssInputs() les découvre
+  // UNIVERSELLEMENT par les marqueurs natifs WordPress (block.json, register_block_type,
+  // registerBlockType JS) — aucune convention de thème supposée. On les ajoute aux sources front :
+  // la machinerie existante (dequeue par nom de fichier de build + <link> @fs) les remplace alors
+  // par leur source Vite. En dev, toutes les feuilles de bloc sont chargées (le conditionnel est
+  // une optim de PROD) → édition live d'un <bloc>.scss visible sans rebuild. Ajoutées APRÈS le
+  // style global (déjà dans frontSources) : la cascade « principal avant blocs » est préservée.
+  const themeRelPath = (abs) =>
+    abs.replace(/\\/g, '/').replace(PATHS.themePath.replace(/\\/g, '/').replace(/\/$/, '') + '/', '');
+  let blockSources = [];
+  try {
+    blockSources = [...new Set(Object.values(detectBlockCssInputs(buildFolder)).map(themeRelPath))]
+      .filter((s) => !frontSources.includes(s));
+  } catch (err) {
+    console.warn('Détection CSS-par-bloc échouée (HMR de bloc dégradé en dev) :', err.message);
+  }
+  const frontSourcesWithBlocks = [...frontSources, ...blockSources];
 
   return `<?php
 /**
@@ -264,7 +285,7 @@ if (!vite_check_server_and_cleanup()) {
 // Assets détectés dynamiquement depuis functions.php
 // Catégorisés par contexte: front, admin (pages WP), editor (iframe Gutenberg)
 // NOTE: Les assets admin ne sont PAS injectés par Vite - WordPress utilise ses assets de build
-\$vite_front_sources = ${JSON.stringify(frontSources, null, 2)};
+\$vite_front_sources = ${JSON.stringify(frontSourcesWithBlocks, null, 2)};
 \$vite_admin_sources = ${JSON.stringify(adminSources, null, 2)}; // Conservé pour référence uniquement
 \$vite_editor_sources = ${JSON.stringify(editorSources, null, 2)};
 \$vite_build_folder = '${buildFolder}';
@@ -312,16 +333,18 @@ function vite_dequeue_build_assets_front() {
           wp_dequeue_style(\$handle);
           wp_deregister_style(\$handle);
 
-          // Si des inline styles existaient, les réenregistrer sur un handle temporaire
-          // pour qu'ils restent dans le HTML (ex: add_css_fse_vars.php)
+          // Ré-enregistrer le handle en PLACEHOLDER VIDE (src=false) : il ne réimprime aucun
+          // <link> de build (la source équivalente est injectée par Vite), mais il reste une
+          // dépendance RÉSOLVABLE. Sans lui, WordPress omet SILENCIEUSEMENT tout style qui
+          // déclare ce handle en dépendance (WP_Dependencies::all_deps() échoue dès qu'une dep
+          // est déregistrée) — ex. les feuilles CSS-par-bloc d'un thème enregistrées avec
+          // deps=[handle du style global] : elles disparaissent toutes du front en mode dev.
+          // Les inline styles éventuels (add_css_fse_vars…) sont réattachés sur ce même handle.
+          wp_register_style(\$handle, false);
           if (!empty(\$inline_styles)) {
-            \$temp_handle = \$handle . '-inline-only';
-            // Enregistrer un style vide (pas de src, juste pour porter les inline styles)
-            wp_register_style(\$temp_handle, false);
-            wp_enqueue_style(\$temp_handle);
-            // Réattacher tous les inline styles
+            wp_enqueue_style(\$handle);
             foreach (\$inline_styles as \$inline_css) {
-              wp_add_inline_style(\$temp_handle, \$inline_css);
+              wp_add_inline_style(\$handle, \$inline_css);
             }
           }
         }
@@ -340,6 +363,9 @@ function vite_dequeue_build_assets_front() {
         )) {
           wp_dequeue_script(\$handle);
           wp_deregister_script(\$handle);
+          // Placeholder vide : préserve le handle comme dépendance résolvable (même raison que
+          // pour les styles ci-dessus) sans réimprimer le <script> de build.
+          wp_register_script(\$handle, false);
         }
       }
     }
